@@ -1,8 +1,17 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "theme.h"
+#include "curvelist.h"
 #include "config.h"       /* cfg_get_int/cfg_set_int: persist the BT on/off intent */
 #include <stdio.h>
+#include <spawn.h>
+#include <dirent.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -27,6 +36,8 @@
  * profile here is stage 1; confirm real headphone playback with the user. */
 
 static lv_obj_t *g_sw, *g_list, *g_info_list;
+static lv_obj_t *g_hring, *g_hglyph, *g_hname, *g_hsub;   /* the state ring + name + line at the top */
+static curvelist_t g_bcl;                                  /* curved device rows */
 static lv_timer_t *g_scan_timer;
 static lv_timer_t *g_scanwait_timer;   /* bt_open's non-destructive "wait for adapter then scan" poll */
 static uint32_t    g_scanwait_start;
@@ -52,15 +63,62 @@ static void scan_stop(void){
 
 /* ---- header helpers (local copies) -------------------------------------- */
 
-static int run_cap(const char *cmd, char *out, int cap){
+/* Run a shell command and capture its output, but never wait longer than `ms`: bluetoothctl blocks
+ * indefinitely when bluetoothd is wedged, and an unbounded popen() here froze the UI (called from
+ * timers) or left the device-list worker stuck forever, so the list never refreshed again. The child
+ * gets its own process group so a timeout kills the whole pipeline. Returns bytes read, -1 on timeout. */
+static int run_cap_to(const char *cmd, char *out, int cap, int ms){
     out[0] = 0;
-    FILE *p = popen(cmd, "r");
-    if(!p){ fprintf(stderr,"bt run_cap popen failed: %s (%s)\n", cmd, strerror(errno)); return 0; }
-    int n = fread(out, 1, cap-1, p);
-    if(n < 0) n = 0;
+    int fd[2]; if(pipe(fd) != 0) return 0;
+    posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, fd[1], 1);
+    posix_spawn_file_actions_addclose(&fa, fd[0]);
+    posix_spawnattr_t at; posix_spawnattr_init(&at);
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETPGROUP); posix_spawnattr_setpgroup(&at, 0);
+    char *argv[] = { "sh", "-c", (char *)cmd, NULL };
+    extern char **environ;
+    pid_t pid; int rc = posix_spawn(&pid, "/bin/sh", &fa, &at, argv, environ);
+    posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at);
+    close(fd[1]);
+    if(rc != 0){ close(fd[0]); fprintf(stderr, "bt run_cap spawn failed: %s\n", cmd); return 0; }
+    int n = 0, timed_out = 0; uint32_t t0 = lv_tick_get();
+    for(;;){
+        int left = ms - (int)lv_tick_elaps(t0);
+        if(left <= 0){ timed_out = 1; break; }
+        struct pollfd p = { .fd = fd[0], .events = POLLIN };
+        int pr = poll(&p, 1, left);
+        if(pr < 0){ if(errno == EINTR) continue; break; }
+        if(pr == 0){ timed_out = 1; break; }
+        ssize_t r = read(fd[0], out + n, (size_t)(cap - 1 - n));
+        if(r <= 0) break;                                   /* EOF: the command finished */
+        n += (int)r; if(n >= cap - 1) break;
+    }
+    close(fd[0]);
+    if(timed_out){ kill(-pid, SIGKILL); fprintf(stderr, "bt: timed out after %d ms: %s\n", ms, cmd); }
+    waitpid(pid, NULL, 0);
     out[n] = 0;
-    pclose(p);
-    return n;
+    return timed_out ? -1 : n;
+}
+static int run_cap(const char *cmd, char *out, int cap){ int n = run_cap_to(cmd, out, cap, 4000); return n < 0 ? 0 : n; }
+
+/* ---- the state header: the ring says it at a glance - grey = off, a short spinning arc = turning on, a full
+ * accent ring = on - with the connected device (or the state) under it ---------------------------------- */
+static void hring_spin_exec(void *var, int32_t v){ lv_arc_set_rotation((lv_obj_t *)var, v % 360); }
+static void hdr_set(int state, const char *name, const char *sub){
+    if(!g_hring) return;
+    lv_anim_delete(g_hring, hring_spin_exec);
+    lv_arc_set_rotation(g_hring, 270);
+    lv_arc_set_value(g_hring, state == BT_ON ? 1000 : state == BT_TURNING_ON ? 260 : 0);
+    lv_obj_set_style_arc_color(g_hring, ui_current_accent(), LV_PART_INDICATOR);
+    if(state == BT_TURNING_ON){
+        lv_anim_t a; lv_anim_init(&a); lv_anim_set_var(&a, g_hring); lv_anim_set_exec_cb(&a, hring_spin_exec);
+        lv_anim_set_values(&a, 270, 270 + 360); lv_anim_set_duration(&a, 1000);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE); lv_anim_start(&a);
+    }
+    lv_obj_set_style_text_color(g_hglyph, lv_color_hex(state == BT_OFF ? TH_TXT3 : TH_TXT1), 0);
+    lv_label_set_text(g_hname, name ? name : "");
+    lv_obj_set_style_text_color(g_hname, lv_color_hex(state == BT_OFF ? TH_TXT2 : TH_TXT1), 0);
+    lv_label_set_text(g_hsub, sub ? sub : "");
 }
 
 /* a single status message (Scanning / off / empty) - centered in the list area */
@@ -107,6 +165,51 @@ static void list_msg_scanning(void){
     lv_anim_start(&a);
 }
 
+/* A bring-up in flight leaves /tmp/bt_enabling; one older than this is a dead bring-up (its subshell
+ * was killed or hung), and a stale marker used to make every later "turn on" silently do nothing. */
+#define BT_ENABLE_MAX_S 45
+static int bt_enabling(void){
+    struct stat st;
+    if(stat("/tmp/bt_enabling", &st) != 0) return 0;
+    if(time(NULL) - st.st_mtime > BT_ENABLE_MAX_S){ unlink("/tmp/bt_enabling"); return 0; }
+    return 1;
+}
+static int proc_running(const char *name){                  /* cheap pidof: /proc/<pid>/comm, no spawn */
+    DIR *d = opendir("/proc"); if(!d) return 0;
+    struct dirent *e; int found = 0;
+    while(!found && (e = readdir(d))){
+        if(e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        char p[64], c[32]; snprintf(p, sizeof p, "/proc/%.40s/comm", e->d_name);
+        FILE *f = fopen(p, "r"); if(!f) continue;
+        if(fgets(c, sizeof c, f)){ c[strcspn(c, "\n")] = 0; found = !strcmp(c, name); }
+        fclose(f);
+    }
+    closedir(d);
+    return found;
+}
+static int rfkill_bt_unblocked(void){
+    int found = 0;
+    for(int i = 0; i < 12; i++){
+        char p[64]; snprintf(p, sizeof p, "/sys/class/rfkill/rfkill%d/type", i);
+        FILE *f = fopen(p, "r"); if(!f) continue;
+        char t[16] = {0}; char *r = fgets(t, sizeof t, f); fclose(f);
+        if(!r || strncmp(t, "bluetooth", 9) != 0) continue;
+        found = 1;
+        snprintf(p, sizeof p, "/sys/class/rfkill/rfkill%d/soft", i);
+        f = fopen(p, "r"); if(!f) continue;
+        int soft = 1; if(fscanf(f, "%d", &soft) != 1) soft = 1; fclose(f);
+        if(soft != 0) return 0;
+    }
+    return found ? 1 : cfg_get_int("bt_on", 0);
+}
+/* BT_OFF / BT_TURNING_ON / BT_ON - what every surface shows (Home icon, Quick Settings, the BT screen).
+ * "On" means the radio is unblocked AND bluetoothd runs: an unblocked radio after a failed bring-up is
+ * not on. Cheap (/proc + /sys reads, no process spawns), so it can be polled once a second. */
+int bt_state(void){
+    if(bt_enabling()) return BT_TURNING_ON;
+    return (rfkill_bt_unblocked() && proc_running("bluetoothd")) ? BT_ON : BT_OFF;
+}
+
 /* powered = bluetoothd up AND adapter Powered: yes */
 static int bt_on(void){
     char b[64]; run_cap("pidof bluetoothd 2>/dev/null", b, sizeof b);
@@ -120,7 +223,8 @@ static int bt_on(void){
  * blocks, and the stock boot can bring BT up per its own SYSCONFIG - unlike the persisted cfg intent,
  * which goes stale when the stock firmware enables BT out from under us. Falls back to the intent if no
  * bluetooth rfkill node exists. */
-int bt_radio_on(void){
+int bt_radio_on(void){ return bt_state() == BT_ON; }
+__attribute__((unused)) static int bt_radio_on_legacy(void){
     int found = 0;
     for(int i = 0; i < 12; i++){
         char p[64]; snprintf(p, sizeof p, "/sys/class/rfkill/rfkill%d/type", i);
@@ -156,13 +260,14 @@ static void bt_enable(void){
      * in flight, and starting another detached subshell would have the two kill each other's
      * patchram/daemons (e.g. boot-restore + a user toggle firing close together) -> BT left broken.
      * bt_disable() removes the marker, so a real off->on still re-enables. */
-    if(access("/tmp/bt_enabling", F_OK) == 0) return;
+    if(bt_enabling()) return;                                   /* a live bring-up (a stale marker is cleared) */
     /* Create the cancel marker SYNCHRONOUSLY before the backgrounded subshell, so it exists by
      * the time we return. bt_enable()/bt_disable() are both main-thread + serialized, so a
      * later bt_disable() `rm` always beats the async subshell - no touch-vs-rm race. */
     system("touch /tmp/bt_enabling 2>/dev/null");
     system(
-        "( killall -9 fiio_bluetoothctl brcm_patchram_plus bluetoothd bluealsa 2>/dev/null; "
+        "( T(){ \"$@\" & p=$!; ( sleep 6; kill -9 $p 2>/dev/null ) & w=$!; wait $p; kill $w 2>/dev/null; }; "   /* 6 s cap per bluetoothctl */
+        "  killall -9 fiio_bluetoothctl brcm_patchram_plus bluetoothd bluealsa 2>/dev/null; "
         "  hciconfig hci0 down 2>/dev/null; "
         /* power-cycle the BT core (BT_REG_ON via rfkill) BEFORE patchram, so the chip
          * re-syncs whether this is a fresh boot OR a re-enable after a prior patchram
@@ -187,8 +292,8 @@ static void bt_enable(void){
         /* hci0 UP alone leaves bluez Powered:no - power the controller on explicitly (needs
          * bluetoothd, hence after its start) so bt_on()'s "Powered: yes" check passes. */
         "  sleep 1; [ -e /tmp/bt_enabling ] || exit; "
-        "  bluetoothctl power on; hciconfig hci0 piscan; hciconfig hci0 class 0x200414; "
-        "  bluetoothctl agent on; bluetoothctl default-agent; bluetoothctl pairable on; "
+        "  T bluetoothctl power on; hciconfig hci0 piscan; hciconfig hci0 class 0x200414; "
+        "  T bluetoothctl agent on; T bluetoothctl default-agent; T bluetoothctl pairable on; "
         "  rm -f /tmp/bt_enabling "     /* enable finished: drop the marker */
         ") >/dev/null 2>&1 &");
     /* NB: bluealsa is started INSIDE the subshell above (after hci0 is RUNNING +
@@ -199,7 +304,7 @@ static void bt_disable(void){
                             * OFF path, which reaches here without a caller-side scan_abort) */
     bt_autoroute_stop();
     system("rm -f /tmp/bt_enabling; "     /* cancel any in-flight bt_enable() subshell first */
-           "bluetoothctl power off >/dev/null 2>&1; hciconfig hci0 down >/dev/null 2>&1; "
+           "hciconfig hci0 down >/dev/null 2>&1; "
            "killall bluealsa bluetoothd brcm_patchram_plus fiio_bluetoothctl bt-agent 2>/dev/null; "
            "rfkill block bluetooth >/dev/null 2>&1");
 }
@@ -383,7 +488,7 @@ static void info_forget_cb(lv_event_t *e){
         bt_disconnect(g_sel_mac);   /* route audio back to analog + clear g_route/autoroute BEFORE removing the sink */
         char cmd[128];
         snprintf(cmd, sizeof cmd, "bluetoothctl remove %s >/dev/null 2>&1", g_sel_mac);
-        ui_toast(system(cmd) == 0 ? "Device forgotten" : "Couldn't forget device");
+        { char o[256]; ui_toast(run_cap_to(cmd, o, sizeof o, 5000) >= 0 ? "Device forgotten" : "Couldn't forget device"); }
     }
     screen_back();
     if(g_scan_timer) lv_timer_del(g_scan_timer);
@@ -465,13 +570,16 @@ void bt_info_open(void){
 }
 
 /* ---- device list -------------------------------------------------------- */
-static void row_free_cb(lv_event_t *e){ free(lv_obj_get_user_data(lv_event_get_target(e))); }
+/* A row's data rides in its event callbacks, NOT in lv_obj user data (the curved-list helper owns that slot). */
+typedef struct { int connected; char mac[20]; } devrow_t;
+static void row_free_cb(lv_event_t *e){ free(lv_event_get_user_data(e)); }
 static void dev_cb(lv_event_t *e){
     if(lv_event_get_code(e)!=LV_EVENT_CLICKED) return;
-    lv_obj_t *row = lv_event_get_target(e);
-    const char *mac = (const char*)lv_obj_get_user_data(row);
-    int connected = (intptr_t)lv_event_get_user_data(e);
-    if(!mac || !mac[0]) return;
+    const devrow_t *dr = lv_event_get_user_data(e);
+    if(!dr) return;
+    const char *mac = dr->mac;
+    int connected = dr->connected;
+    if(!mac[0]) return;
     if(connected){
         snprintf(g_sel_mac, sizeof g_sel_mac, "%s", mac);
         ui_route_bt(mac);        /* tapping a connected audio device routes playback to it (no-op if already) */
@@ -479,6 +587,7 @@ static void dev_cb(lv_event_t *e){
     } else {
         bt_connect(mac);
         list_msg("Connecting " LV_SYMBOL_BLUETOOTH);
+        if(g_hsub) lv_label_set_text(g_hsub, "Connecting...");
         /* re-list shortly so the new connection picks up its ✓ */
         if(g_scan_timer) lv_timer_del(g_scan_timer);
         g_scan_timer = lv_timer_create(scan_timer_cb, 4000, NULL);
@@ -486,41 +595,40 @@ static void dev_cb(lv_event_t *e){
     }
 }
 
+#define BROW_W 268
 static void add_dev_row(const char *mac, const char *name, int connected){
     lv_obj_t *r = lv_button_create(g_list);
     lv_obj_remove_style_all(r);
-    lv_obj_set_size(r, 280, 46);
-    lv_obj_set_style_radius(r, 8, 0);
-    lv_obj_set_style_bg_color(r, lv_color_hex(connected ? 0x0A2A4A : 0x1C1C1E), 0);
-    lv_obj_set_style_bg_opa(r, connected ? LV_OPA_COVER : LV_OPA_50, 0);
-    lv_obj_set_style_bg_color(r, lv_color_hex(0x2C2C2E), LV_STATE_PRESSED);
+    lv_obj_set_size(r, BROW_W, 54);
+    lv_obj_add_flag(r, LV_OBJ_FLAG_USER_1);                 /* curves with the circle */
+    lv_obj_set_style_radius(r, TH_R_ROW, 0);
+    lv_obj_set_style_bg_color(r, lv_color_hex(connected ? TH_SURF2 : TH_SURF1), 0);
+    lv_obj_set_style_bg_opa(r, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(r, lv_color_hex(TH_SURF2), LV_STATE_PRESSED);
     lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
-    char *dup = strdup(mac);
-    lv_obj_set_user_data(r, dup);
-    lv_obj_add_event_cb(r, dev_cb, LV_EVENT_CLICKED, (void*)(intptr_t)connected);
-    lv_obj_add_event_cb(r, row_free_cb, LV_EVENT_DELETE, NULL);
+    devrow_t *dr = malloc(sizeof *dr);
+    if(dr){ dr->connected = connected; snprintf(dr->mac, sizeof dr->mac, "%s", mac); }
+    lv_obj_add_event_cb(r, dev_cb, LV_EVENT_CLICKED, dr);
+    lv_obj_add_event_cb(r, row_free_cb, LV_EVENT_DELETE, dr);
 
-    int tx = 12;
-    if(connected){
-        lv_obj_t *ck = lv_label_create(r);
-        lv_label_set_text(ck, LV_SYMBOL_OK);
-        lv_obj_set_pos(ck, 12, 15);
-        lv_obj_set_style_text_font(ck, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(ck, lv_color_hex(0x0A84FF), 0);
-        tx = 34;
-    }
+    lv_obj_t *ic = lv_label_create(r);                       /* headphones: accent when connected */
+    lv_label_set_text(ic, LV_SYMBOL_AUDIO);
+    lv_obj_set_pos(ic, 14, 18);
+    lv_obj_set_style_text_font(ic, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(ic, connected ? ui_current_accent() : lv_color_hex(TH_TXT2), 0);
     lv_obj_t *t = lv_label_create(r);
     lv_label_set_text(t, name);
     lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(t, tx, 13); lv_obj_set_size(t, 232 - tx, 20);
-    lv_obj_set_style_text_font(t, ui_font_cjk(16), 0);   /* BT device names are user data: Cyrillic/CJK-capable (issue #3) */
-    lv_obj_set_style_text_color(t, lv_color_hex(0xFFFFFF), 0);
-
-    lv_obj_t *ic = lv_label_create(r);
-    lv_label_set_text(ic, LV_SYMBOL_BLUETOOTH);
-    lv_obj_set_pos(ic, 252, 14);
-    lv_obj_set_style_text_font(ic, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(ic, lv_color_hex(connected ? 0x0A84FF : 0x8E8E93), 0);
+    lv_obj_set_pos(t, 42, 6); lv_obj_set_size(t, BROW_W - 42 - (connected ? 40 : 16), 24);
+    lv_obj_set_style_text_font(t, ui_font_cjk(18), 0);       /* BT device names are user data: Cyrillic/CJK-capable (issue #3) */
+    lv_obj_set_style_text_color(t, lv_color_hex(TH_TXT1), 0);
+    lv_obj_t *sl = lv_label_create(r);
+    lv_label_set_text(sl, connected ? "Connected" : "Tap to connect");
+    lv_obj_set_pos(sl, 42, 31);
+    lv_obj_set_style_text_font(sl, TH_F_DETAIL, 0);
+    lv_obj_set_style_text_color(sl, connected ? ui_current_accent() : lv_color_hex(TH_TXT2), 0);
+    if(connected){ lv_obj_t *ch = lv_label_create(r); lv_label_set_text(ch, LV_SYMBOL_RIGHT);   /* opens its details */
+                   lv_obj_align(ch, LV_ALIGN_RIGHT_MID, -16, 0); lv_obj_set_style_text_color(ch, lv_color_hex(TH_TXT3), 0); }
 }
 
 /* Show only real AUDIO devices (bluez Icon = audio-card / audio-headset / ...),
@@ -545,7 +653,7 @@ static int             g_scan_pending = 0;   /* main-thread: a re-enumerate was 
 
 static void *scan_worker(void *arg){
     unsigned my_gen = (unsigned)(intptr_t)arg;
-    char buf[8192]; run_cap("bluetoothctl devices 2>/dev/null", buf, sizeof buf);
+    char buf[8192]; if(run_cap_to("bluetoothctl devices 2>/dev/null", buf, sizeof buf, 4000) < 0) buf[0] = 0;
     bt_scan_dev_t res[40]; int n = 0;
     char *l = buf;
     while(l && *l && n < 40){
@@ -557,7 +665,7 @@ static void *scan_worker(void *arg){
             if(name[0] && bt_mac_valid(mac)){
                 char cmd[128], info[2048];
                 snprintf(cmd, sizeof cmd, "bluetoothctl info %s 2>/dev/null", mac);
-                run_cap(cmd, info, sizeof info);
+                if(run_cap_to(cmd, info, sizeof info, 3000) < 0) break;   /* bluetoothd not answering: stop, publish what we have */
                 char icon[64], cv[16];   /* line-anchored: a spoofed device name can't fake Icon/Connected */
                 if(bt_info_prop(info, "Icon:", icon, sizeof icon) && !strncmp(icon, "audio", 5)){  /* audio sinks only */
                     snprintf(res[n].mac,  sizeof res[n].mac,  "%s", mac);
@@ -596,6 +704,10 @@ static void scan_render(void){
     for(int i = 0; i < n; i++) if(local[i].connected)  add_dev_row(local[i].mac, local[i].name, 1);  /* connected first */
     for(int i = 0; i < n; i++) if(!local[i].connected) add_dev_row(local[i].mac, local[i].name, 0);
     if(n == 0) list_msg("No audio devices found");
+    else { lv_obj_update_layout(g_list); curvelist_update(&g_bcl); }
+    {   const char *cn = NULL;
+        for(int i = 0; i < n; i++) if(local[i].connected){ cn = local[i].name; break; }
+        hdr_set(BT_ON, cn ? cn : "Bluetooth is on", cn ? "Connected" : "Connect a speaker to play audio (beta)"); }
     /* NOTE: audio output routing to the BT sink is intentionally DISABLED.
      * bluez+bluealsa does SBC encoding in software, which is too heavy for this
      * MIPS CPU (laggy audio + watchdog reboots), and the 0666 output-mux command
@@ -702,7 +814,7 @@ static void radio_on_poll_cb(lv_timer_t *t){
         cfg_set_int("bt_on", 0);
         if(g_sw) lv_obj_clear_state(g_sw, LV_STATE_CHECKED);
         bt_disable();
-        list_msg("Couldn't turn on Bluetooth");
+        list_msg("Couldn't turn on Bluetooth"); hdr_set(BT_OFF, "Bluetooth is off", "Couldn't turn it on");
     }
 }
 static void sw_cb(lv_event_t *e){
@@ -711,7 +823,7 @@ static void sw_cb(lv_event_t *e){
     if(on){
         cfg_set_int("bt_on", 1);   /* persist intent so boot restores it (mirror WiFi) */
         bt_enable();
-        list_msg("Turning on " LV_SYMBOL_BLUETOOTH);
+        list_msg("Please wait..."); hdr_set(BT_TURNING_ON, "Turning on...", "");
         g_radio_start = lv_tick_get();
         if(g_scanwait_timer){ lv_timer_del(g_scanwait_timer); g_scanwait_timer = NULL; }  /* radio poll owns bring-up now - keep the two mutually exclusive */
         if(g_radio_timer) lv_timer_del(g_radio_timer);
@@ -723,14 +835,14 @@ static void sw_cb(lv_event_t *e){
         scan_abort();          /* cancel any pending/active scan so it can't render over "off" */
         ui_route_analog();     /* return audio to the DAC before killing the BT stack */
         bt_disable();
-        list_msg("Bluetooth is off");
+        list_msg("Switch it on to find devices"); hdr_set(BT_OFF, "Bluetooth is off", "");
     }
 }
 
 /* Quick Settings tile short-press: flip BT + persist intent, no screen-specific UI.
  * Mirrors sw_cb's actions (bt_boot_restore/keepalive enforce the intent). Returns new state. */
 int bt_toggle(void){
-    int on = !bt_radio_on();   /* flip the ACTUAL radio state, not the (possibly stale) persisted intent */
+    int on = (bt_state() == BT_OFF);   /* on or mid-bring-up -> turn off; off -> turn on */
     cfg_set_int("bt_on", on);
     if(on){
         bt_enable();
@@ -741,6 +853,7 @@ int bt_toggle(void){
         ui_route_analog();     /* return audio to the DAC before killing the BT stack */
         bt_disable();
     }
+    if(g_hring){ if(on) hdr_set(BT_TURNING_ON, "Turning on...", ""); else hdr_set(BT_OFF, "Bluetooth is off", ""); }
     /* keep the BT screen's switch in sync so it reflects reality when opened later */
     if(g_sw){ if(on) lv_obj_add_state(g_sw, LV_STATE_CHECKED); else lv_obj_clear_state(g_sw, LV_STATE_CHECKED); }
     ui_status_refresh();   /* update the home BT icon immediately (don't wait for the next status poll) */
@@ -785,70 +898,71 @@ void bt_boot_restore(void){
 }
 
 static void rescan_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED) start_scan(); }
-static void back_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED) screen_back(); }
+__attribute__((unused)) static void back_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED) screen_back(); }
 
 void bt_create(lv_obj_t *root){
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
-    ui_header_cb(root, "Bluetooth", back_cb);   /* shared header */
+    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* control row: pill with [label + switch]; scan button OUTSIDE, to the
-     * right of the switch (still inside the round screen). */
-    lv_obj_t *trow = lv_obj_create(root);
-    lv_obj_remove_style_all(trow);
-    lv_obj_set_pos(trow, 50, 64); lv_obj_set_size(trow, 208, 48);
-    lv_obj_set_style_radius(trow, 12, 0);
-    lv_obj_set_style_bg_color(trow, lv_color_hex(0x1C1C1E), 0);
-    lv_obj_set_style_bg_opa(trow, LV_OPA_70, 0);
-    lv_obj_clear_flag(trow, LV_OBJ_FLAG_SCROLLABLE);
+    g_hring = lv_arc_create(root);
+    lv_obj_remove_style(g_hring, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(g_hring, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(g_hring, 84, 84); lv_obj_align(g_hring, LV_ALIGN_TOP_MID, 0, 34);
+    lv_arc_set_rotation(g_hring, 270); lv_arc_set_bg_angles(g_hring, 0, 360); lv_arc_set_range(g_hring, 0, 1000); lv_arc_set_value(g_hring, 0);
+    lv_obj_set_style_arc_width(g_hring, 4, LV_PART_MAIN); lv_obj_set_style_arc_color(g_hring, lv_color_hex(TH_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(g_hring, 4, LV_PART_INDICATOR); lv_obj_set_style_arc_rounded(g_hring, true, LV_PART_INDICATOR);
+    g_hglyph = lv_label_create(root);
+    lv_label_set_text(g_hglyph, LV_SYMBOL_BLUETOOTH);
+    lv_obj_set_style_text_font(g_hglyph, &lv_font_montserrat_28, 0);
+    lv_obj_align(g_hglyph, LV_ALIGN_TOP_MID, 0, 62);
+    g_hname = lv_label_create(root);
+    lv_label_set_long_mode(g_hname, LV_LABEL_LONG_DOT); lv_obj_set_width(g_hname, 230);
+    lv_obj_set_style_text_align(g_hname, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(g_hname, ui_font_cjk(18), 0);
+    lv_obj_align(g_hname, LV_ALIGN_TOP_MID, 0, 128);
+    g_hsub = lv_label_create(root);
+    lv_label_set_long_mode(g_hsub, LV_LABEL_LONG_DOT); lv_obj_set_width(g_hsub, 250);
+    lv_obj_set_style_text_align(g_hsub, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(g_hsub, ui_font_cjk(14), 0); lv_obj_set_style_text_color(g_hsub, lv_color_hex(TH_TXT2), 0);
+    lv_obj_align(g_hsub, LV_ALIGN_TOP_MID, 0, 152);
 
-    lv_obj_t *tl = lv_label_create(trow);
-    lv_label_set_text(tl, "Bluetooth");
-    lv_obj_set_pos(tl, 16, 14);
-    lv_obj_set_style_text_font(tl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(tl, lv_color_hex(0xFFFFFF), 0);
-
-    g_sw = lv_switch_create(trow);
+    g_sw = lv_switch_create(root);
     lv_obj_set_size(g_sw, 46, 24);
-    lv_obj_set_ext_click_area(g_sw, 10);
-    lv_obj_align(g_sw, LV_ALIGN_RIGHT_MID, -14, 0);
+    lv_obj_set_ext_click_area(g_sw, 12);
+    lv_obj_align(g_sw, LV_ALIGN_TOP_MID, 106, 64);
+    lv_obj_set_style_bg_color(g_sw, lv_color_hex(TH_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(g_sw, ui_current_accent(), (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_add_event_cb(g_sw, sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *rb = lv_button_create(root);
     lv_obj_remove_style_all(rb);
-    lv_obj_set_pos(rb, 266, 72); lv_obj_set_size(rb, 36, 32);
+    lv_obj_set_size(rb, 34, 34); lv_obj_align(rb, LV_ALIGN_TOP_MID, -106, 59);
     lv_obj_set_ext_click_area(rb, 8);
-    lv_obj_set_style_radius(rb, 10, 0);
-    lv_obj_set_style_bg_color(rb, lv_color_hex(0x1C1C1E), 0);
-    lv_obj_set_style_bg_opa(rb, LV_OPA_70, 0);
-    lv_obj_set_style_bg_color(rb, lv_color_hex(0x2C2C2E), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(rb, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(rb, lv_color_hex(TH_SURF1), 0);
+    lv_obj_set_style_bg_opa(rb, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(rb, lv_color_hex(TH_SURF2), LV_STATE_PRESSED);
     lv_obj_add_event_cb(rb, rescan_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *rl = lv_label_create(rb);
     lv_label_set_text(rl, LV_SYMBOL_REFRESH);
-    lv_obj_set_style_text_font(rl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(rl, lv_color_hex(0xC7C7CC), 0);
+    lv_obj_set_style_text_font(rl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(rl, lv_color_hex(TH_TXT2), 0);
     lv_obj_center(rl);
-
-    /* Honesty: audio routing to a BT speaker works now (auto-routes on connect), but SBC
-     * sw-encode on this MIPS CPU can be rough (occasional artifacts) - label it beta. */
-    lv_obj_t *note = lv_label_create(root);
-    lv_label_set_text(note, "Connect a speaker to play audio (beta)");
-    lv_obj_set_pos(note, 30, 113); lv_obj_set_width(note, 300);
-    lv_obj_set_style_text_align(note, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(note, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(note, lv_color_hex(0x6E6E73), 0);
 
     g_list = lv_obj_create(root);
     lv_obj_remove_style_all(g_list);
-    lv_obj_set_pos(g_list, 40, 134); lv_obj_set_size(g_list, 280, 184);
-    lv_obj_set_style_pad_bottom(g_list, 44, 0);   /* last row scrolls clear of the round bottom bezel */
+    lv_obj_set_pos(g_list, (360 - BROW_W) / 2, 182); lv_obj_set_size(g_list, BROW_W, 170);
+    lv_obj_set_style_pad_bottom(g_list, 30, 0);
     lv_obj_set_style_bg_opa(g_list, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_row(g_list, 6, 0);
+    lv_obj_set_style_pad_row(g_list, 4, 0);
     lv_obj_set_flex_flow(g_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(g_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scroll_dir(g_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(g_list, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(g_list, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    curvelist_attach(&g_bcl, g_list, root, BROW_W);
+    hdr_set(BT_OFF, "Bluetooth", "");
 }
 
 /* Non-destructive "wait for the adapter, then scan" poll used when the BT screen is opened while the
@@ -867,10 +981,12 @@ static void scanwait_poll_cb(lv_timer_t *t){
     if(lv_tick_elaps(g_scanwait_start) > 28000){    /* gave up waiting - do NOT tear the radio down */
         lv_timer_del(g_scanwait_timer); g_scanwait_timer = NULL;
         list_msg(bt_radio_on() ? "Bluetooth is starting up" : "Bluetooth is off");
+        if(bt_radio_on()) hdr_set(BT_ON, "Bluetooth is on", "Starting up..."); else hdr_set(BT_OFF, "Bluetooth is off", "");
     }
 }
 
 void bt_open(void){
+    if(g_sw) lv_obj_set_style_bg_color(g_sw, ui_current_accent(), (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_CHECKED);   /* follow an accent change */
     /* "should BT be on" = the intent OR the live radio. Intent is the reliable signal right after a QS
      * toggle, because bt_enable() rfkill-blocks-then-unblocks, so bt_radio_on() reads 0 for a moment. */
     int want = cfg_get_int("bt_on", 0) || bt_radio_on();
@@ -886,6 +1002,7 @@ void bt_open(void){
     if(g_radio_timer){ lv_timer_del(g_radio_timer); g_radio_timer = NULL; }
     if(g_scanwait_timer){ lv_timer_del(g_scanwait_timer); g_scanwait_timer = NULL; }
     if(bt_on()){                                   /* fully up -> scan immediately */
+        hdr_set(BT_ON, "Bluetooth is on", "");
         bt_ensure_services(); bt_autoroute_start(); start_scan();
     } else if(want){                                /* on/coming up (e.g. just toggled from Quick Settings)
                                                      * -> poll until Powered, then scan. NON-destructive:
@@ -893,10 +1010,12 @@ void bt_open(void){
                                                      * timeout, so observing an externally-enabled radio (or a
                                                      * flaky bt_on() probe) can't kill a working controller. */
         list_msg_scanning();
+        hdr_set(BT_TURNING_ON, "Turning on...", "");
         g_scanwait_start = lv_tick_get();
         if(g_scanwait_timer) lv_timer_del(g_scanwait_timer);
         g_scanwait_timer = lv_timer_create(scanwait_poll_cb, 1000, NULL);
     } else {
-        list_msg("Bluetooth is off");
+        list_msg("Switch it on to find devices");
+        hdr_set(BT_OFF, "Bluetooth is off", "");
     }
 }

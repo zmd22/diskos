@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "theme.h"
+#include "ipc.h"
 #include "config.h"
 #include <time.h>
 #include <math.h>
@@ -20,6 +22,9 @@
 
 LV_FONT_DECLARE(font_weather16)
 static lv_font_t s_swfont;   /* montserrat_16 + weather-icon fallback */
+static lv_font_t s_swfont_big;   /* montserrat_22 + icons: the Ring style's weather line */
+static char g_wx_full[160];     /* the full reading; the Ring style shows only icon + temperature */
+static void weather_apply(void);
 
 static lv_obj_t *g_bg;
 static lv_obj_t *g_clock;
@@ -39,6 +44,24 @@ static lv_point_precise_t g_hpts[2], g_mpts[2], g_spts[2];
 
 /* vinyl (stock-style: just the spinning square cover - no disc/label/spindle) */
 static lv_obj_t *g_vinyl;    /* the spinning square cover image */
+/* Ring (style 5): the Home Ring clock, dimmed - clock, date, weather and the playing track inside a faint
+ * progress ring with the cover riding it. Everything is grey or darkened; it redraws once a minute. */
+static lv_obj_t *g_rring, *g_rdisc, *g_rdisc_img;
+static char g_rlast[16];
+#define SR_R 148                  /* the bigger ring: close to the rim */
+#define SR_DISC 34
+static void ring_place(int frac){
+    if(!g_rdisc) return;
+    float a = (-90.0f + frac * 0.36f) * 0.0174533f;
+    lv_obj_set_pos(g_rdisc, 180 + (int)lroundf(SR_R * cosf(a)) - SR_DISC / 2, 180 + (int)lroundf(SR_R * sinf(a)) - SR_DISC / 2);
+}
+static void ring_progress(void){                /* called when the minute changes */
+    if(!g_rring) return;
+    track_state_t st; ipc_get_state(&st);
+    int f = (st.have_track && st.duration_ms > 0) ? (int)((long long)st.position_ms * 1000 / st.duration_ms) : 0;
+    if(f > 1000) f = 1000;
+    lv_arc_set_value(g_rring, f); ring_place(f);
+}
 static int g_vspin = 0;      /* spin state (idempotent) */
 static int g_have_track = 0; /* is a track currently loaded? The art savers (Cover backdrop + Vinyl
                                 cover) show ONLY when a track is loaded, so an idle player shows
@@ -224,6 +247,16 @@ static void relayout(int style)
     int cover  = (style == 0);
     int minim  = (style == 2);
     int vinyl  = (style == 4);
+    int ring   = (style == 5);
+    lv_obj_t *rparts[] = { g_rring, g_rdisc };
+    for (unsigned i = 0; i < 2; i++)
+        if (rparts[i]) { if (ring && g_have_track) lv_obj_remove_flag(rparts[i], LV_OBJ_FLAG_HIDDEN);
+                         else lv_obj_add_flag(rparts[i], LV_OBJ_FLAG_HIDDEN); }
+    lv_color_t dimw = lv_color_make(ring ? 200 : 255, ring ? 200 : 255, ring ? 205 : 255);
+    if (g_clock) lv_obj_set_style_text_color(g_clock, dimw, 0);
+    { lv_color_t dimg = ring ? lv_color_make(120, 120, 126) : lv_color_hex(0xAEAEB2);   /* the Ring saver: greys only */
+      if (g_date) lv_obj_set_style_text_color(g_date, dimg, 0);
+      if (g_weather) lv_obj_set_style_text_color(g_weather, dimg, 0); }
 
     /* backdrop only in Cover AND only when a track is loaded (never reveal a stale cover on an
      * idle player when the style changes or the saver is entered manually) */
@@ -248,20 +281,36 @@ static void relayout(int style)
     if (g_clock) {
         if (analog || vinyl) lv_obj_add_flag(g_clock, LV_OBJ_FLAG_HIDDEN);
         else { lv_obj_remove_flag(g_clock, LV_OBJ_FLAG_HIDDEN);
-               lv_obj_align(g_clock, LV_ALIGN_TOP_MID, 0, minim ? 150 : 110); }
+               lv_obj_set_style_text_font(g_clock, ring ? &lv_font_montserrat_48 : &lv_font_montserrat_40, 0);
+               /* Ring: 48 px is the largest built-in size, so scale it up ~1.3x (redrawn once a minute: cheap) */
+               lv_obj_set_style_transform_pivot_x(g_clock, lv_pct(50), 0); lv_obj_set_style_transform_pivot_y(g_clock, lv_pct(50), 0);
+               lv_obj_set_style_transform_scale(g_clock, ring ? 333 : 256, 0);
+               lv_obj_align(g_clock, LV_ALIGN_TOP_MID, 0, ring ? 134 : (minim ? 150 : 110)); }
     }
     /* date: every style except vinyl, position varies */
     if (g_date) {
-        if (vinyl) lv_obj_add_flag(g_date, LV_OBJ_FLAG_HIDDEN);
+        if (vinyl || ring) lv_obj_add_flag(g_date, LV_OBJ_FLAG_HIDDEN);   /* Ring: no date */
         else { lv_obj_remove_flag(g_date, LV_OBJ_FLAG_HIDDEN);
-               lv_obj_align(g_date, LV_ALIGN_TOP_MID, 0, analog ? 250 : (minim ? 206 : 170)); }
+               lv_obj_align(g_date, LV_ALIGN_TOP_MID, 0, ring ? 184 : (analog ? 250 : (minim ? 206 : 170))); }
     }
     /* weather: Cover + Digital */
-    if (g_weather) { if (cover || style == 3) lv_obj_remove_flag(g_weather, LV_OBJ_FLAG_HIDDEN);
-                     else lv_obj_add_flag(g_weather, LV_OBJ_FLAG_HIDDEN); }
+    if (g_weather) { if (cover || style == 3 || ring) lv_obj_remove_flag(g_weather, LV_OBJ_FLAG_HIDDEN);
+                     else lv_obj_add_flag(g_weather, LV_OBJ_FLAG_HIDDEN);
+                     lv_obj_set_style_text_font(g_weather, ring ? &s_swfont_big : &s_swfont, 0);
+                     if (ring) lv_obj_align(g_weather, LV_ALIGN_TOP_MID, 0, 80);    /* Ring: weather on top */
+                     else lv_obj_align(g_weather, LV_ALIGN_TOP_MID, 0, 200);
+                     weather_apply(); }
     /* track/artist: Cover only */
-    if (g_track)  { if (cover) lv_obj_remove_flag(g_track, LV_OBJ_FLAG_HIDDEN);  else lv_obj_add_flag(g_track, LV_OBJ_FLAG_HIDDEN); }
-    if (g_artist) { if (cover) lv_obj_remove_flag(g_artist, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_artist, LV_OBJ_FLAG_HIDDEN); }
+    if (g_track)  { if (cover || ring) lv_obj_remove_flag(g_track, LV_OBJ_FLAG_HIDDEN);  else lv_obj_add_flag(g_track, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_set_style_text_font(g_track, ring ? ui_font_cjk(28) : &lv_font_montserrat_16, 0);
+                    lv_obj_set_width(g_track, ring ? 240 : 320);   /* inside the ring */
+                    if (ring) lv_obj_align(g_track, LV_ALIGN_TOP_MID, 0, 208); else lv_obj_align(g_track, LV_ALIGN_TOP_MID, 0, 254); }
+    if (ring) { g_rlast[0] = 0; ring_progress(); }
+    if (g_artist) { if (cover || ring) lv_obj_remove_flag(g_artist, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_artist, LV_OBJ_FLAG_HIDDEN);
+                    lv_obj_set_style_text_font(g_artist, ring ? ui_font_cjk(24) : &lv_font_montserrat_14, 0);
+                    lv_obj_set_width(g_artist, ring ? 230 : 320);
+                    lv_obj_set_style_text_color(g_artist, ring ? lv_color_make(104, 104, 110) : lv_color_hex(0x8E8E93), 0);
+                    if (ring) lv_obj_align(g_artist, LV_ALIGN_TOP_MID, 0, 244); else lv_obj_align(g_artist, LV_ALIGN_TOP_MID, 0, 278); }
 }
 
 void saver_create(lv_obj_t *root)
@@ -315,6 +364,8 @@ void saver_create(lv_obj_t *root)
 
     s_swfont = lv_font_montserrat_16;
     s_swfont.fallback = &font_weather16;
+    s_swfont_big = lv_font_montserrat_28;
+    s_swfont_big.fallback = &font_weather16;
 
     g_clock   = mk(root, &lv_font_montserrat_40, lv_color_hex(0xFFFFFF), 110);
     g_date    = mk(root, &lv_font_montserrat_16, lv_color_hex(0xC7C7CC), 170);
@@ -326,6 +377,31 @@ void saver_create(lv_obj_t *root)
     relayout(cfg_get_int("saver_style", 0));
     g_style = cfg_get_int("saver_style", 0);
     lv_timer_create(saver_anim_cb, 1000, NULL);   /* analog seconds hand */
+    g_rring = lv_arc_create(root);
+    lv_obj_remove_style(g_rring, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(g_rring, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(g_rring, 2 * SR_R, 2 * SR_R);
+    lv_obj_center(g_rring);
+    lv_arc_set_rotation(g_rring, 270);
+    lv_arc_set_bg_angles(g_rring, 0, 360);
+    lv_arc_set_range(g_rring, 0, 1000);
+    lv_obj_set_style_arc_width(g_rring, 3, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(g_rring, lv_color_make(34, 34, 36), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(g_rring, 3, LV_PART_INDICATOR);
+    lv_obj_add_flag(g_rring, LV_OBJ_FLAG_HIDDEN);
+    g_rdisc = lv_obj_create(root);
+    lv_obj_remove_style_all(g_rdisc);
+    lv_obj_set_size(g_rdisc, SR_DISC, SR_DISC);
+    lv_obj_set_style_radius(g_rdisc, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_clip_corner(g_rdisc, true, 0);
+    lv_obj_set_style_bg_color(g_rdisc, lv_color_make(40, 40, 44), 0);
+    lv_obj_set_style_bg_opa(g_rdisc, LV_OPA_COVER, 0);
+    lv_obj_set_style_opa(g_rdisc, 170, 0);                 /* dimmed like the rest */
+    lv_obj_clear_flag(g_rdisc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(g_rdisc, LV_OBJ_FLAG_HIDDEN);
+    g_rdisc_img = lv_image_create(g_rdisc);
+    lv_obj_clear_flag(g_rdisc_img, LV_OBJ_FLAG_CLICKABLE);
+
 }
 
 /* repaint the saver's accent-bearing decorations (analog second hand + hub, vinyl
@@ -334,6 +410,8 @@ void saver_create(lv_obj_t *root)
  * pointers are always valid. */
 void saver_set_accent(lv_color_t c)
 {
+    if (g_rring) lv_obj_set_style_arc_color(g_rring, lv_color_mix(ui_media_accent(), lv_color_black(), 120), LV_PART_INDICATOR);
+    if (g_track && g_style == 5) lv_obj_set_style_text_color(g_track, lv_color_mix(ui_media_accent(), lv_color_black(), 150), 0);
     if (g_sec)    lv_obj_set_style_line_color(g_sec, c, 0);
     if (g_hub)    lv_obj_set_style_bg_color(g_hub, c, 0);
 }
@@ -357,6 +435,7 @@ void saver_set_clock(const char *t, const char *date)
     if (s != g_style) { relayout(s); g_style = s; }
 
     if (g_clock) lv_label_set_text(g_clock, t ? t : "--:--");
+    if (g_style == 5 && t && strcmp(t, g_rlast)){ snprintf(g_rlast, sizeof g_rlast, "%s", t); ring_progress(); }   /* once a minute */
     if (g_date)  lv_label_set_text(g_date, date ? date : "");
 
     /* analog hands from the live time */
@@ -367,9 +446,22 @@ void saver_set_clock(const char *t, const char *date)
     }
 }
 
+/* "<icon>  14°C  Partly cloudy" -> "<icon>  14°C": the icon and temperature only (the condition dropped) */
+static void wx_short(const char *in, char *out, size_t cap){
+    if(!in){ out[0] = 0; return; }
+    const char *a = strstr(in, "  "); const char *b = a ? strstr(a + 2, "  ") : NULL;
+    size_t n = b ? (size_t)(b - in) : strlen(in); if(n >= cap) n = cap - 1;
+    memcpy(out, in, n); out[n] = 0;
+}
+static void weather_apply(void){
+    if(!g_weather) return;
+    if(g_style == 5){ char s[96]; wx_short(g_wx_full, s, sizeof s); lv_label_set_text(g_weather, s); }
+    else lv_label_set_text(g_weather, g_wx_full);
+}
 void saver_set_weather(const char *text)
 {
-    if (g_weather) lv_label_set_text(g_weather, text ? text : "");
+    snprintf(g_wx_full, sizeof g_wx_full, "%s", text ? text : "");
+    weather_apply();
 }
 
 void saver_set_track(const char *title, const char *artist, const void *backdrop_src)
@@ -377,6 +469,11 @@ void saver_set_track(const char *title, const char *artist, const void *backdrop
     /* The caller passes a non-NULL title iff st.have_track (NULL when no track), so key off
      * NULL-ness, not emptiness - a valid but untitled file still counts as a loaded track. */
     g_have_track = (title != NULL);
+    if (g_rdisc_img){ const void *dsc = ui_current_cover_dsc(); lv_image_set_src(g_rdisc_img, NULL);
+        if (dsc){ const lv_image_dsc_t *d = dsc; lv_image_set_src(g_rdisc_img, dsc);
+                  if (d->header.w > 0) lv_image_set_scale(g_rdisc_img, (uint32_t)(SR_DISC * 256 / d->header.w) + 2);
+                  lv_obj_center(g_rdisc_img); } }
+    if (g_style == 5) relayout(5);
     if (g_track)  lv_label_set_text(g_track, title ? title : "");
     if (g_artist) lv_label_set_text(g_artist, artist ? artist : "");
 

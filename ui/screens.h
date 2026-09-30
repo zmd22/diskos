@@ -4,8 +4,58 @@
 #define SCREENS_H
 #include "lvgl/lvgl.h"
 #include "ipc.h"
+
+/* diskOS red: the single UI accent (switches, sliders, "on" states, Settings row bars, default
+ * accent colour). Ported from our fork's theme. */
+#define UI_RED 0xE4122C
+
+/* synced lyrics for the immersive view: one line per timestamp, sorted by time */
+typedef struct { long ms; char text[120]; } lyr_line_t;
+int lyrics_timed_load(const char *path, lyr_line_t *out, int cap);
+void npmenu_refresh_art(void);       /* NP menu shown: cover + wash */
+void usage_create(lv_obj_t *root);   /* Settings > Battery: the 24-hour usage dial */
+void usage_refresh(void);
+void usage_tick(int screen_on, int playing);        /* main loop: one sample a minute */
+void usage_note_battery(int pct, int charging);     /* status poll */
+void usage_save(void);                              /* before a power-off */
+long queue_pid(int create);          /* the "Queue" playlist */
+int  queue_count(void);
+int  queue_add_path(const char *path);   /* 1 added, 0 already there, -1 failed */
+int  queue_add_group(const char *col, const char *val);
+int  queue_add_folder(const char *dir);
+void queue_clear(void);
+void queue_touched(void);
+void queue_open(void);
+void queue_tick(const track_state_t *st, int playing);
+void queue_note_external_play(void);
+int  queue_next(void);
+void queue_note_prev(void);                  /* the Previous button was pressed */                       /* Next with songs queued: play the first of them (1 = handled) */        /* the user started something: the queue re-anchors after it */
+int  queue_remove_at(int i); int queue_move(int from, int to); void queue_shuffle(void); void queue_jump(int i);
+void queue_path_moved(const char *oldp, const char *newp); void queue_path_removed(const char *p);
+void queue_create(lv_obj_t *root); void queue_refresh(void);
+void ui_play_slot(int pos);
+void ui_play_restore(int type, const char *name, long pid, int pos);
+int  ui_play_context(int *type, char *name, int cap, long *pid);
+long ui_playing_playlist(void);           /* the custom playlist being played, 0 = none */
+void ui_queue_changed(void);              /* the Queue's size changed: refresh the NP badge */
+void songmenu_open_song(const char *path);   /* Library long-press on a song */
+void songmenu_open_file(const char *dir, const char *name, void (*done)(void));   /* folder browser: a song file */
+void songmenu_open_folder(const char *dir, const char *name, void (*done)(void)); /* folder browser: a folder */
+void fileops_action(const char *dir, const char *name, int is_dir, void (*done)(void), int action);  /* 0 rename, 1 copy/move, 2 delete */
+void songinfo_show_song(const track_state_t *st);
+void songinfo_unpin(void);
+void plpick_set_folder(const char *dir);
+void tagfix_song(const char *path, const char *title, const char *artist, const char *album, long dur_ms);
+void tagfix_folder(const char *dir);
+void ui_toast_icon(const char *icon, lv_color_t icol, const char *msg);   /* toast with its own icon */
+void ui_scan_orbit(int on);            /* the rescan dot orbiting the rim */
+void fileops_open(const char *dir, const char *name, int is_dir, void (*done)(void));  /* folder browser long-press */
+void tagfix_current_track(void);      /* NP menu: add synced lyrics + artwork the current track is missing */
+void tagfix_current_album(void);      /* NP menu: the same for every track of its album */
+void tagfix_auto_tick(const track_state_t *st, int playing);   /* Auto-tag (Settings > Playback) */
+void ui_np_tags_changed(void);        /* tags were rewritten: lyrics views reload */
 #include <stdbool.h>
-enum { SCR_HOME, SCR_LIBRARY, SCR_NOWPLAYING, SCR_SETTINGS, SCR_SETTING_DETAIL, SCR_SEARCH, SCR_SAVER, SCR_QUICK, SCR_SONGINFO, SCR_NPMENU, SCR_TUNE, SCR_EQ, SCR_APPS, SCR_NPHUB, SCR_PLPICK, SCR_PLVIEW, SCR_WIFI, SCR_WIFI_INFO, SCR_BT, SCR_BT_INFO, SCR_WEATHER, SCR_LYRICS, SCR_COLORPICK, SCR_LASTFM, SCR_WORKMODE, SCR_DEBUG, SCR_FOLDER, SCR_BOOKS, SCR_CHAPTERS, SCR_SETLIST, SCR_QSCONFIG, SCR_ALBUMWALL, SCR_COUNT };
+enum { SCR_HOME, SCR_LIBRARY, SCR_NOWPLAYING, SCR_SETTINGS, SCR_SETTING_DETAIL, SCR_SEARCH, SCR_SAVER, SCR_QUICK, SCR_SONGINFO, SCR_NPMENU, SCR_TUNE, SCR_EQ, SCR_APPS, SCR_NPHUB, SCR_PLPICK, SCR_PLVIEW, SCR_WIFI, SCR_WIFI_INFO, SCR_BT, SCR_BT_INFO, SCR_WEATHER, SCR_LYRICS, SCR_COLORPICK, SCR_LASTFM, SCR_WORKMODE, SCR_DEBUG, SCR_FOLDER, SCR_BOOKS, SCR_CHAPTERS, SCR_SETLIST, SCR_QSCONFIG, SCR_ALBUMWALL, SCR_USAGE, SCR_QUEUE, SCR_COUNT };
 void screens_init(void);
 void screen_show(int which);
 void screen_back(void);
@@ -26,6 +76,10 @@ void quicksettings_build(void);            /* rebuild the drawer from config (ca
 void qsconfig_create(lv_obj_t *root);      /* SCR_QSCONFIG: pick which drawer tiles appear */
 void qsconfig_refresh(void);
 void quicksettings_refresh(int playing);
+void quicksettings_set_now_playing(const char *title, const char *artist, int playing);
+void quicksettings_set_volume(int vol);
+void quicksettings_set_art(const void *cover_dsc, const void *backdrop);   /* orbit hub cover + wash (path or RAM image) */
+void quicksettings_set_battery(int pct, int charging);                          /* bottom-rim battery arc */
 /* song info (songinfo.c) */
 void songinfo_create(lv_obj_t *root);
 void songinfo_set(const track_state_t *st);
@@ -71,12 +125,15 @@ void bt_create(lv_obj_t *root);
 void bt_open(void);
 int  bt_toggle(void);          /* Quick Settings tile short-press: flip BT + persist, returns new state */
 int  bt_radio_on(void);        /* cheap actual BT-enabled state (rfkill), for the status icon + QS tile */
+enum { BT_OFF, BT_ON, BT_TURNING_ON };
+int  bt_state(void);          /* off / on / turning on: cheap (/proc + /sys), safe to poll every second */
 void bt_info_create(lv_obj_t *root);
 void bt_info_open(void);
 void bt_boot_restore(void);   /* at startup: re-enable BT + arm auto-route if it was on */
 void bt_notify_player_restart(void);   /* player restarted: forget stale auto-route so the poll re-routes */
 int  ui_player_settling(void);         /* 1 while the player is still in its post-restart late-init settle window */
 void library_open_album(const char *name);
+void library_open_album_focus(const char *album, const char *artist, const char *path);   /* album, current song highlighted */
 void library_open_artist(const char *name);
 void albumwall_create(lv_obj_t *root);     /* SCR_ALBUMWALL: cover-flow album browser */
 void albumwall_refresh(void);              /* rebuilt per entry from the album list */
@@ -147,6 +204,7 @@ long ui_smart_rewind_ms(long idle_seconds);  /* how far to back up on resume, by
 void ui_defer_sleep(void);                    /* hold the sleep pause off briefly after a transport tap */
 void setting_detail_create(lv_obj_t *root);
 void setting_detail_refresh(void);
+int  eqcustom_owns_point(int x, int y);   /* the round EQ's dial: no back-swipe starts there */
 void eqcustom_refresh(void);   /* re-resolve the edited USER slot on SCR_EQ entry (display-only) */
 void settings_open_detail(int idx);
 void settings_open_key(const char *key);   /* open a setting detail by cfg key (drawer tiles) */
@@ -201,6 +259,8 @@ void ui_np_fsart_open(void);
 void ui_np_fsart_close(void);
 int  ui_np_fsart_active(void);   /* 1 while the full-screen art is up (suppress NP seek/nav) */
 const char *ui_current_cover_src(void);
+const void *ui_current_backdrop_img(void);  /* the blurred backdrop decoded in RAM, else its file path */
+void ui_np_rescroll(void);                  /* Now Playing shown: let a long title scroll again */
 const void *ui_current_cover_dsc(void);   /* rotatable cover for vinyl saver */
 void saver_vinyl_spin(int want);          /* drive saver vinyl spin (from main loop) */
 const char *ui_current_thumb_src(void);
@@ -224,7 +284,7 @@ void lyrics_open(void);                     /* fetch current track lyrics + show
 void lyrics_poll(lv_timer_t *t);            /* apply a finished fetch (main thread) */
 void home_set_now_playing(const char *title, const char *artist, lv_color_t accent, bool playing);
 void home_set_art_src(const void *src);
-void home_set_backdrop(const char *src);   /* full-screen blurred album backdrop on Home */
+void home_set_backdrop(const void *src);   /* full-screen blurred album backdrop on Home (path or RAM image) */
 typedef void (*home_settings_click_cb_t)(void);
 void home_set_settings_click_cb(home_settings_click_cb_t cb);
 /* library */

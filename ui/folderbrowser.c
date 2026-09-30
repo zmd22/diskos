@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "vlist.h"
+#include "curvelist.h"
+#include "theme.h"
 #include "folderbrowser.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -149,40 +152,57 @@ static void fb_empty_label(const char *msg){
     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
 }
 
+#define FB_ROW_W 268
+#define FB_ROW_H TH_ROW_H
+static curvelist_t g_fcl;                   /* curved rows + position dots, like the Library */
 static void fb_row_cb(lv_event_t *e);
+static void fb_long_cb(lv_event_t *e);
+static vlist_t g_fbv;                       /* long folders: only the rows near the view exist */
 
+/* Rows in the Library's style: 54 px, curved with the circle, the name at 18 px and a detail line at 16 px -
+ * folders with an accent folder icon and a chevron, songs with a note and their format. */
 static void fb_add_row(int i){
         fb_entry_t *en = &g_ent[i];
         lv_obj_t *r = lv_button_create(g_list);
         lv_obj_remove_style_all(r);
-        lv_obj_set_size(r, 280, 46);
-        lv_obj_set_style_radius(r, 8, 0);
-        lv_obj_set_style_bg_color(r, lv_color_hex(0x1C1C1E), LV_STATE_PRESSED);
-        lv_obj_set_style_bg_opa(r, LV_OPA_70, LV_STATE_PRESSED);
+        lv_obj_set_size(r, FB_ROW_W, FB_ROW_H);
+        lv_obj_add_flag(r, LV_OBJ_FLAG_USER_1);                         /* curves with the circle */
+        lv_obj_set_style_radius(r, TH_R_ROW, 0);
+        lv_obj_set_style_bg_color(r, lv_color_hex(TH_SURF1), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(r, LV_OPA_COVER, LV_STATE_PRESSED);
         lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_ext_click_area(r, 2);
-        lv_obj_add_event_cb(r, fb_row_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(r, fb_row_cb, LV_EVENT_SHORT_CLICKED, (void *)(intptr_t)i);   /* short: a hold opens the menu */
+        lv_obj_add_event_cb(r, fb_long_cb, LV_EVENT_LONG_PRESSED, (void *)(intptr_t)i);
 
         lv_obj_t *ic = lv_label_create(r);
         lv_label_set_text(ic, en->is_dir ? LV_SYMBOL_DIRECTORY : LV_SYMBOL_AUDIO);
-        lv_obj_set_pos(ic, 10, 14);
+        lv_obj_set_pos(ic, 12, 17);
         lv_obj_set_style_text_font(ic, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(ic, en->is_dir ? lv_color_hex(0xE5C158) : lv_color_hex(0x8E8E93), 0);
+        lv_obj_set_style_text_color(ic, en->is_dir ? ui_current_accent() : lv_color_hex(TH_TXT3), 0);
 
         lv_obj_t *nm = lv_label_create(r);
         lv_label_set_text(nm, en->name);
         lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(nm, 40, 14);
-        lv_obj_set_size(nm, en->is_dir ? 206 : 228, 20);
-        lv_obj_set_style_text_font(nm, ui_font_cjk(16), 0);   /* CJK filenames, like Library/Search */
-        lv_obj_set_style_text_color(nm, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_pos(nm, 40, en->is_dir ? 15 : 6);
+        lv_obj_set_size(nm, en->is_dir ? FB_ROW_W - 72 : FB_ROW_W - 50, 22);
+        lv_obj_set_style_text_font(nm, ui_font_cjk(18), 0);           /* CJK filenames, like Library/Search */
+        lv_obj_set_style_text_color(nm, lv_color_hex(TH_TXT1), 0);
 
         if(en->is_dir){
             lv_obj_t *ch = lv_label_create(r);
             lv_label_set_text(ch, LV_SYMBOL_RIGHT);
-            lv_obj_set_pos(ch, 256, 15);
-            lv_obj_set_style_text_font(ch, &lv_font_montserrat_16, 0);
-            lv_obj_set_style_text_color(ch, lv_color_hex(0x636366), 0);
+            lv_obj_set_pos(ch, FB_ROW_W - 26, 18);
+            lv_obj_set_style_text_font(ch, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_color(ch, lv_color_hex(TH_TXT3), 0);
+        } else {                                                    /* detail: the format */
+            const char *e = strrchr(en->name, '.'); char fmt[8] = "";
+            if(e){ int k = 0; for(e++; *e && k < 6; e++) fmt[k++] = (char)((*e >= 'a' && *e <= 'z') ? *e - 32 : *e); fmt[k] = 0; }
+            lv_obj_t *dt = lv_label_create(r);
+            lv_label_set_text(dt, fmt[0] ? fmt : "Audio");
+            lv_obj_set_pos(dt, 40, 30);
+            lv_obj_set_style_text_font(dt, TH_F_DETAIL, 0);
+            lv_obj_set_style_text_color(dt, lv_color_hex(TH_TXT2), 0);
         }
 }
 
@@ -190,7 +210,7 @@ static void fb_fill_cb(lv_timer_t *t){
     (void)t;
     int end = g_fb_i + 40; if(end > g_nent) end = g_nent;   /* render in batches so scrolling stays responsive */
     for(; g_fb_i < end; g_fb_i++) fb_add_row(g_fb_i);
-    if(g_fb_i >= g_nent) fb_fill_stop();
+    if(g_fb_i >= g_nent){ fb_fill_stop(); lv_obj_update_layout(g_list); curvelist_update(&g_fcl); }
 }
 
 static void fb_rebuild(void){
@@ -200,6 +220,7 @@ static void fb_rebuild(void){
         lv_label_set_text(g_title, at_root ? "Files" : fb_basename(g_dir));
     }
     if(!g_list) return;
+    vlist_end(&g_fbv);
     lv_obj_clean(g_list);
 
     /* opendir failed at scan time -> either no SD or an unreadable dir. */
@@ -216,9 +237,12 @@ static void fb_rebuild(void){
 
     /* Render the first screenful synchronously, then the rest on a timer so a folder with
      * thousands of files doesn't stall the UI on open (mirrors the Library song list). */
+    lv_obj_scroll_to_y(g_list, 0, LV_ANIM_OFF);
+    if(g_nent >= VLIST_MIN){ vlist_begin(&g_fbv, g_list, g_nent, FB_ROW_H, 4, 0, 272, fb_add_row); g_fb_i = g_nent; curvelist_update(&g_fcl); return; }
     g_fb_i = 0;
     int first = g_nent < 20 ? g_nent : 20;
     for(; g_fb_i < first; g_fb_i++) fb_add_row(g_fb_i);
+    lv_obj_update_layout(g_list); curvelist_update(&g_fcl);   /* the first screenful curves right away */
     if(g_fb_i < g_nent) g_fb_fill = lv_timer_create(fb_fill_cb, 16, NULL);
     lv_obj_scroll_to_y(g_list, 0, LV_ANIM_OFF);
 }
@@ -256,7 +280,7 @@ static void fb_play(const char *name){
 }
 
 static void fb_row_cb(lv_event_t *e){
-    if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    if(lv_event_get_code(e) != LV_EVENT_SHORT_CLICKED) return;
     int i = (int)(intptr_t)lv_event_get_user_data(e);
     if(i < 0 || i >= g_nent) return;
     fb_entry_t *en = &g_ent[i];
@@ -264,6 +288,20 @@ static void fb_row_cb(lv_event_t *e){
     else           fb_play(en->name);
 }
 
+static void fb_scroll_cb(lv_event_t *e){ (void)e; vlist_follow(&g_fbv); }
+/* after a file operation: re-read this folder and stay where we were */
+static void fb_refresh(void){
+    int y = g_list ? lv_obj_get_scroll_y(g_list) : 0;
+    fb_scan(); fb_rebuild();
+    if(g_list){ lv_obj_update_layout(g_list); lv_obj_scroll_to_y(g_list, y, LV_ANIM_OFF); }
+}
+static void fb_long_cb(lv_event_t *e){          /* the long-press menu: queue actions + file operations */
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if(i < 0 || i >= g_nent) return;
+    if(g_ent[i].is_dir) songmenu_open_folder(g_dir, g_ent[i].name, fb_refresh);
+    else if(fb_is_audio(g_ent[i].name)) songmenu_open_file(g_dir, g_ent[i].name, fb_refresh);
+    else fileops_open(g_dir, g_ent[i].name, 0, fb_refresh);    /* other files: file operations only */
+}
 static void fb_header_back_cb(lv_event_t *e){
     if(lv_event_get_code(e) == LV_EVENT_CLICKED) fb_ascend();
 }
@@ -276,16 +314,18 @@ void folderbrowser_create(lv_obj_t *root){
 
     g_list = lv_obj_create(root);
     lv_obj_remove_style_all(g_list);
-    lv_obj_set_pos(g_list, 40, 72);
-    lv_obj_set_size(g_list, 290, 272);
+    lv_obj_set_pos(g_list, (360 - FB_ROW_W) / 2, 72);
+    lv_obj_set_size(g_list, FB_ROW_W, 272);
     lv_obj_set_style_pad_bottom(g_list, 44, 0);   /* last row scrolls clear of the round bottom bezel */
     lv_obj_set_style_bg_opa(g_list, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(g_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(g_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(g_list, 6, 0);
+    lv_obj_set_style_pad_row(g_list, 4, 0);
     lv_obj_set_scroll_dir(g_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(g_list, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(g_list, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    lv_obj_add_event_cb(g_list, fb_scroll_cb, LV_EVENT_SCROLL, NULL);   /* the window first, then the curve */
+    curvelist_attach(&g_fcl, g_list, root, FB_ROW_W);
 
     snprintf(g_dir, sizeof g_dir, "%s", FB_ROOT);   /* first content built on open() */
 }

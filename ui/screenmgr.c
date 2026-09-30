@@ -117,9 +117,13 @@ static void transition(int from, int to, int dir)
     else if (to == SCR_QUICK) quicksettings_build();        /* drawer rebuilt from config on every open */
     else if (to == SCR_EQ) eqcustom_refresh();              /* re-resolve edited USER slot */
     else if (to == SCR_ALBUMWALL) albumwall_refresh();      /* cover-flow album browser */
+    else if (to == SCR_USAGE) usage_refresh();              /* battery & usage dial */
+    else if (to == SCR_QUEUE) queue_refresh();              /* the up-next queue */
+    else if (to == SCR_NPMENU) npmenu_refresh_art();        /* the cover in the menu's hub */
     else if (to == SCR_TUNE)  tune_refresh();
     else if (to == SCR_NPHUB) nphub_refresh();   /* book-aware hub (Chapters for audiobooks) */
     else if (to == SCR_SAVER) saver_show_sync();
+    else if (to == SCR_NOWPLAYING) ui_np_rescroll();   /* long titles scroll a while, then settle */
     else if (to == SCR_PLVIEW) plview_refresh();   /* fresh song list every entry (no stale tap positions) */
     else if (to == SCR_LIBRARY) library_refresh(); /* pick up playlists created (NP New Playlist) or imported
                                                     * (Settings) elsewhere, without needing a restart */
@@ -273,6 +277,8 @@ void screens_init(void)
     s_roots[SCR_SETLIST] = screen_make_root(parent);
     s_roots[SCR_QSCONFIG] = screen_make_root(parent);
     s_roots[SCR_ALBUMWALL] = screen_make_root(parent);
+    s_roots[SCR_USAGE]     = screen_make_root(parent);
+    s_roots[SCR_QUEUE]     = screen_make_root(parent);
 
     /* depth scrim: a full-screen translucent-black overlay, created LAST so it sits above the
      * roots in sibling order; re-parented in z during a transition to dim the screen beneath the
@@ -297,6 +303,8 @@ void screens_init(void)
     setlist_create(s_roots[SCR_SETLIST]);
     qsconfig_create(s_roots[SCR_QSCONFIG]);
     albumwall_create(s_roots[SCR_ALBUMWALL]);
+    usage_create(s_roots[SCR_USAGE]);
+    queue_create(s_roots[SCR_QUEUE]);
     search_create(s_roots[SCR_SEARCH]);
     saver_create(s_roots[SCR_SAVER]);
     quicksettings_create(s_roots[SCR_QUICK]);

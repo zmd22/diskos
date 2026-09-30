@@ -1,20 +1,25 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
-/* toast.c - transient bottom-of-screen message for completion feedback.
- * ui_toast("Imported 3 playlists") shows a pill on lv_layer_top that auto-dismisses.
- * Non-blocking, non-clickable (doesn't eat touches). Replaces any prior toast. */
+/* toast.c - short messages as a dark pill near the top rim, with a small icon on the left (the accent by
+ * default; a green tick for success). Non-blocking, non-clickable, replaces any prior toast, auto-dismisses.
+ * Also the library-rescan indicator: while a scan runs, a small accent dot with a fading trail orbits the rim
+ * over whatever is on screen (only those few pixels redraw). */
 #include "screens.h"
+#include "theme.h"
+#include "scanner.h"
+#include <math.h>
+#include <string.h>
 
 static lv_obj_t   *g_toast;
 static lv_timer_t *g_toast_timer;
 
 static void toast_hide_cb(lv_timer_t *t)
 {
+    (void)t;
     if(g_toast){ lv_obj_delete_async(g_toast); g_toast = NULL; }
     if(g_toast_timer){ lv_timer_delete(g_toast_timer); g_toast_timer = NULL; }
 }
-
-void ui_toast(const char *msg)
+void ui_toast_icon(const char *icon, lv_color_t icol, const char *msg)
 {
     if(!msg) return;
     if(g_toast){ lv_obj_delete_async(g_toast); g_toast = NULL; }
@@ -22,23 +27,77 @@ void ui_toast(const char *msg)
 
     g_toast = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(g_toast);
-    lv_obj_set_style_bg_color(g_toast, lv_color_hex(0x2C2C2E), 0);
+    lv_obj_set_style_bg_color(g_toast, lv_color_hex(0x18181A), 0);
     lv_obj_set_style_bg_opa(g_toast, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(g_toast, 16, 0);
-    lv_obj_set_style_pad_all(g_toast, 12, 0);
+    lv_obj_set_style_border_color(g_toast, lv_color_hex(0x38383C), 0);
+    lv_obj_set_style_border_width(g_toast, 1, 0);
+    lv_obj_set_style_radius(g_toast, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_hor(g_toast, 16, 0);
+    lv_obj_set_style_pad_ver(g_toast, 9, 0);
+    lv_obj_set_style_pad_column(g_toast, 9, 0);
     lv_obj_set_size(g_toast, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_max_width(g_toast, 230, 0);   /* round-screen: bottom chord is narrow, keep the pill inside it */
-    lv_obj_align(g_toast, LV_ALIGN_BOTTOM_MID, 0, -64);  /* raised off the clipped bottom edge into the wider chord */
-    lv_obj_clear_flag(g_toast, LV_OBJ_FLAG_CLICKABLE);   /* let touches pass through */
+    lv_obj_set_flex_flow(g_toast, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(g_toast, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_align(g_toast, LV_ALIGN_TOP_MID, 0, 40);          /* near the top rim, inside the circle */
+    lv_obj_clear_flag(g_toast, LV_OBJ_FLAG_CLICKABLE);       /* let touches pass through */
     lv_obj_clear_flag(g_toast, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *ic = lv_label_create(g_toast);
+    lv_label_set_text(ic, icon ? icon : LV_SYMBOL_BULLET);
+    lv_obj_set_style_text_font(ic, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(ic, icol, 0);
 
     lv_obj_t *l = lv_label_create(g_toast);
     lv_label_set_text(l, msg);
     lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(l, 204);
-    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(l, ui_font_cjk(16), 0);   /* some toasts embed a filename/name: chain (issue #3) */
-    lv_obj_set_style_text_color(l, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_max_width(l, 172, 0);                   /* the pill stays inside the upper chord */
+    lv_obj_set_width(l, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_font(l, ui_font_cjk(14), 0);       /* some toasts embed a filename/name */
+    lv_obj_set_style_text_color(l, lv_color_hex(TH_TXT1), 0);
 
-    g_toast_timer = lv_timer_create(toast_hide_cb, 2200, NULL);
+    g_toast_timer = lv_timer_create(toast_hide_cb, 2400, NULL);
+}
+void ui_toast(const char *msg){ ui_toast_icon(LV_SYMBOL_BULLET, ui_current_accent(), msg); }
+
+/* ---- the rescan orbit ---------------------------------------------------------------------------------- */
+#define ORB_N 7
+#define ORB_R 170
+static lv_obj_t *g_orb[ORB_N];
+static lv_timer_t *g_orb_timer;
+static int g_orb_on;
+static uint32_t g_orb_t0;
+static void orb_place(void){
+    float a0 = (float)lv_tick_elaps(g_orb_t0) * 0.18f - 90.0f;      /* one lap every 2 s */
+    for(int k = 0; k < ORB_N; k++){
+        float a = (a0 - k * 3.4f) * 0.0174533f;
+        int sz = lv_obj_get_width(g_orb[k]);
+        lv_obj_set_pos(g_orb[k], 180 + (int)lroundf(ORB_R * cosf(a)) - sz / 2, 180 + (int)lroundf(ORB_R * sinf(a)) - sz / 2);
+    }
+}
+static void orb_tick(lv_timer_t *t){ (void)t; if(g_orb_on) orb_place(); }
+void ui_scan_orbit(int on){
+    on = on ? 1 : 0;
+    if(on == g_orb_on) return;
+    g_orb_on = on;
+    if(!g_orb[0]){
+        for(int k = 0; k < ORB_N; k++){
+            g_orb[k] = lv_obj_create(lv_layer_top());
+            lv_obj_remove_style_all(g_orb[k]);
+            int sz = k == 0 ? 10 : 8 - k;                              /* the head, then a shrinking trail */
+            if(sz < 3) sz = 3;
+            lv_obj_set_size(g_orb[k], sz, sz);
+            lv_obj_set_style_radius(g_orb[k], LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_bg_opa(g_orb[k], k == 0 ? LV_OPA_COVER : (lv_opa_t)(220 - k * 30), 0);
+            lv_obj_clear_flag(g_orb[k], LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        }
+    }
+    for(int k = 0; k < ORB_N; k++){
+        lv_obj_set_style_bg_color(g_orb[k], k == 0 ? lv_color_hex(0xFFFFFF) : ui_current_accent(), 0);
+        if(on) lv_obj_remove_flag(g_orb[k], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_orb[k], LV_OBJ_FLAG_HIDDEN);
+    }
+    if(on){
+        g_orb_t0 = lv_tick_get(); orb_place();
+        if(!g_orb_timer) g_orb_timer = lv_timer_create(orb_tick, 50, NULL);   /* 20 fps: smooth enough, cheap */
+        else lv_timer_resume(g_orb_timer);
+    } else if(g_orb_timer) lv_timer_pause(g_orb_timer);
 }

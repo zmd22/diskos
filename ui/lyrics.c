@@ -4,6 +4,7 @@
 #include "ipc.h"
 #include "musicdb.h"
 #include <stdio.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -144,6 +145,120 @@ static int json_plain_lyrics(const char *resp, char *out, int cap)
     return len;
 }
 
+/* ---- lyrics embedded in the audio file itself ----------------------------------------------------------
+ * MP3: ID3v2 USLT (unsynced) or SYLT (synced; timestamps dropped), v2.2 ULT/SLT too, any text encoding.
+ * FLAC: Vorbis comment LYRICS= or UNSYNCEDLYRICS=. Big frames (cover art) are skipped with fseek, so a
+ * 5 MB embedded picture costs nothing. Output is UTF-8, possibly still carrying [mm:ss] tags, which the
+ * caller strips exactly like a sidecar .lrc. Returns the number of bytes written. */
+static int put_utf8(char *out, int cap, int n, unsigned cp){
+    if(cp < 0x80){ if(n + 1 < cap) out[n++] = (char)cp; }
+    else if(cp < 0x800){ if(n + 2 < cap){ out[n++] = (char)(0xC0 | (cp >> 6)); out[n++] = (char)(0x80 | (cp & 0x3F)); } }
+    else if(cp < 0x10000){ if(n + 3 < cap){ out[n++] = (char)(0xE0 | (cp >> 12)); out[n++] = (char)(0x80 | ((cp >> 6) & 0x3F)); out[n++] = (char)(0x80 | (cp & 0x3F)); } }
+    else if(n + 4 < cap){ out[n++] = (char)(0xF0 | (cp >> 18)); out[n++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                          out[n++] = (char)(0x80 | ((cp >> 6) & 0x3F)); out[n++] = (char)(0x80 | (cp & 0x3F)); }
+    return n;
+}
+/* decode one ID3 text run (enc 0 latin1, 1 UTF-16+BOM, 2 UTF-16BE, 3 UTF-8) of len bytes; returns bytes used
+ * up to and including the terminator, so SYLT can walk entry by entry */
+static int id3_text(const unsigned char *b, int len, int enc, char *out, int cap, int *n){
+    int i = 0;
+    if(enc == 1 || enc == 2){
+        int be = (enc == 2);
+        if(enc == 1 && len >= 2){ if(b[0] == 0xFE && b[1] == 0xFF){ be = 1; i = 2; } else if(b[0] == 0xFF && b[1] == 0xFE){ be = 0; i = 2; } }
+        for(; i + 1 < len; i += 2){
+            unsigned u = be ? (unsigned)(b[i] << 8 | b[i+1]) : (unsigned)(b[i+1] << 8 | b[i]);
+            if(u == 0){ i += 2; break; }
+            if(u >= 0xD800 && u < 0xDC00 && i + 3 < len){
+                unsigned lo = be ? (unsigned)(b[i+2] << 8 | b[i+3]) : (unsigned)(b[i+3] << 8 | b[i+2]);
+                if(lo >= 0xDC00 && lo < 0xE000){ u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00); i += 2; }
+            }
+            *n = put_utf8(out, cap, *n, u);
+        }
+        return i;
+    }
+    for(; i < len; i++){
+        if(b[i] == 0){ i++; break; }
+        if(enc == 0) *n = put_utf8(out, cap, *n, b[i]);
+        else if(*n + 1 < cap) out[(*n)++] = (char)b[i];
+    }
+    return i;
+}
+static int id3_skip_term(const unsigned char *b, int len, int enc){   /* skip a descriptor string */
+    int i = 0;
+    if(enc == 1 || enc == 2){ for(; i + 1 < len; i += 2) if(!b[i] && !b[i+1]) return i + 2; return len; }
+    for(; i < len; i++) if(!b[i]) return i + 1;
+    return len;
+}
+static int read_embedded_lyrics(const char *path, char *out, int cap){
+    FILE *f = fopen(path, "rb");
+    if(!f) return 0;
+    int n = 0; unsigned char h[10];
+    if(fread(h, 1, 10, f) != 10){ fclose(f); return 0; }
+    if(!memcmp(h, "ID3", 3)){
+        int ver = h[3];
+        long end = 10 + (((long)(h[6]&0x7F)) << 21 | (h[7]&0x7F) << 14 | (h[8]&0x7F) << 7 | (h[9]&0x7F));
+        long pos = 10;
+        while(pos + (ver == 2 ? 6 : 10) <= end && !n){
+            unsigned char fh[10]; int hl = (ver == 2) ? 6 : 10;
+            if(fseek(f, pos, SEEK_SET) || fread(fh, 1, hl, f) != (size_t)hl || !fh[0]) break;
+            long sz = (ver == 2) ? ((long)fh[3] << 16 | fh[4] << 8 | fh[5])
+                    : (ver == 4) ? (((long)(fh[4]&0x7F)) << 21 | (fh[5]&0x7F) << 14 | (fh[6]&0x7F) << 7 | (fh[7]&0x7F))
+                                 : ((long)fh[4] << 24 | (long)fh[5] << 16 | fh[6] << 8 | fh[7]);
+            if(sz <= 0 || pos + hl + sz > end) break;
+            int uslt = (ver == 2) ? !memcmp(fh, "ULT", 3) : !memcmp(fh, "USLT", 4);
+            int sylt = (ver == 2) ? !memcmp(fh, "SLT", 3) : !memcmp(fh, "SYLT", 4);
+            if((uslt || sylt) && sz < 256 * 1024){
+                unsigned char *b = malloc((size_t)sz);
+                if(b && fread(b, 1, (size_t)sz, f) == (size_t)sz && sz > 4){
+                    int enc = b[0], i = 4;                              /* enc + 3-byte language */
+                    if(sylt) i += 2;                                     /* timestamp format + content type */
+                    i += id3_skip_term(b + i, (int)sz - i, enc);         /* content descriptor */
+                    if(uslt) id3_text(b + i, (int)sz - i, enc, out, cap, &n);
+                    else while(i < sz){                                  /* SYLT: text, then a 4-byte timestamp */
+                        int used = id3_text(b + i, (int)sz - i, enc, out, cap, &n);
+                        if(used <= 0) break;
+                        i += used + 4;
+                        if(n + 1 < cap) out[n++] = '\n';
+                    }
+                }
+                free(b);
+            }
+            pos += hl + sz;
+        }
+    } else if(!memcmp(h, "fLaC", 4)){
+        long pos = 4;
+        for(int blk = 0; blk < 64 && !n; blk++){
+            unsigned char bh[4];
+            if(fseek(f, pos, SEEK_SET) || fread(bh, 1, 4, f) != 4) break;
+            long len = (long)bh[1] << 16 | bh[2] << 8 | bh[3];
+            if((bh[0] & 0x7F) == 4 && len < 512 * 1024){                /* VORBIS_COMMENT */
+                unsigned char *b = malloc((size_t)len + 1);
+                if(b && fread(b, 1, (size_t)len, f) == (size_t)len){
+                    long p = 0;
+                    #define LE32(x) ((unsigned long)(x)[0] | (unsigned long)(x)[1] << 8 | (unsigned long)(x)[2] << 16 | (unsigned long)(x)[3] << 24)
+                    if(p + 4 <= len){ p += 4 + (long)LE32(b + p); }      /* vendor string */
+                    unsigned long cnt = (p + 4 <= len) ? LE32(b + p) : 0; p += 4;
+                    for(unsigned long c = 0; c < cnt && p + 4 <= len && !n; c++){
+                        long cl = (long)LE32(b + p); p += 4;
+                        if(cl < 0 || p + cl > len) break;
+                        const char *kv = (const char *)b + p;
+                        int klen = !strncasecmp(kv, "LYRICS=", 7) ? 7 : !strncasecmp(kv, "UNSYNCEDLYRICS=", 15) ? 15 : 0;
+                        if(klen){ long vl = cl - klen; if(vl > cap - 1) vl = cap - 1; memcpy(out, kv + klen, (size_t)vl); n = (int)vl; }
+                        p += cl;
+                    }
+                    #undef LE32
+                }
+                free(b);
+            }
+            if(bh[0] & 0x80) break;                                      /* last metadata block */
+            pos += 4 + len;
+        }
+    }
+    fclose(f);
+    if(n < cap) out[n] = 0; else out[cap - 1] = 0;
+    return n;
+}
+
 static void *lyrics_thread(void *arg)
 {
     ly_job_t *job = (ly_job_t *)arg;   /* our private snapshot; no shared-global reads */
@@ -152,8 +267,16 @@ static void *lyrics_thread(void *arg)
     resp[0] = 0;
     g_lbuf[0] = 0;                      /* sole writer until we publish; main reads after the lock */
 
-    /* 1) local sibling .lrc FIRST - instant for offline users who sideloaded lyrics (no 12s wait) */
+    /* 0) lyrics embedded in the file's own tags - offline, no sidecar needed */
     if(job->path[0]){
+        static char emb[16384];
+        if(read_embedded_lyrics(job->path, emb, sizeof emb) > 0){
+            FILE *m = fmemopen(emb, strlen(emb), "r");               /* reuse the .lrc stripper for [mm:ss] tags */
+            if(m){ strip_lrc(m, g_lbuf, sizeof g_lbuf); fclose(m); }
+        }
+    }
+    /* 1) local sibling .lrc - instant for offline users who sideloaded lyrics (no 12s wait) */
+    if(!g_lbuf[0] && job->path[0]){
         char lrc[320]; derive_lrc(job->path, lrc, sizeof lrc);
         FILE *f = fopen(lrc, "r");
         if(f){ strip_lrc(f, g_lbuf, sizeof g_lbuf); fclose(f); }
@@ -302,4 +425,68 @@ void lyrics_create(lv_obj_t *root)
     lv_obj_set_style_text_font(g_text, ui_font_cjk(16), 0);   /* CJK lyrics render via Source Han Sans fallback */
     lv_obj_set_style_text_color(g_text, lv_color_hex(0xE5E5EA), 0);
     lv_label_set_text(g_text, "");
+}
+
+/* ---- timed lyrics for the immersive view ---------------------------------------------------------------
+ * Same sources as the scrolling view, minus the network: tags embedded in the file first, then the sidecar
+ * .lrc - but here the [mm:ss.xx] stamps are KEPT. A line may carry several stamps (repeated chorus); each
+ * becomes its own entry. Metadata tags ([ar:], [ti:] ...) are skipped. Returns the number of lines, sorted
+ * by time; 0 when the lyrics are untimed or absent. Small and synchronous: no network, bounded reads. */
+static int lrc_stamp(const char *p, long *ms){          /* parses "[m:ss]" / "[mm:ss.xx]" / "[mm:ss:xx]" */
+    if(*p != '[') return 0;
+    const char *q = p + 1; long mm = 0, ss = 0, frac = 0; int fd = 0;
+    if(*q < '0' || *q > '9') return 0;
+    while(*q >= '0' && *q <= '9') mm = mm * 10 + (*q++ - '0');
+    if(*q++ != ':' || *q < '0' || *q > '9') return 0;
+    while(*q >= '0' && *q <= '9') ss = ss * 10 + (*q++ - '0');
+    if(*q == '.' || *q == ':'){ q++; while(*q >= '0' && *q <= '9'){ if(fd < 3){ frac = frac * 10 + (*q - '0'); fd++; } q++; } }
+    if(*q != ']') return 0;
+    while(fd < 3){ frac *= 10; fd++; }
+    *ms = (mm * 60 + ss) * 1000 + frac;
+    return (int)(q - p) + 1;
+}
+static pthread_mutex_t g_timed_mu = PTHREAD_MUTEX_INITIALIZER;   /* the tagger calls this from its worker too */
+static int lyrics_timed_load_locked(const char *path, lyr_line_t *out, int cap);
+int lyrics_timed_load(const char *path, lyr_line_t *out, int cap){
+    pthread_mutex_lock(&g_timed_mu);
+    int n = lyrics_timed_load_locked(path, out, cap);
+    pthread_mutex_unlock(&g_timed_mu);
+    return n;
+}
+static int lyrics_timed_load_locked(const char *path, lyr_line_t *out, int cap){
+    static char raw[16384];
+    int n = 0;
+    if(!path || !path[0] || cap <= 0) return 0;
+    raw[0] = 0;
+    if(read_embedded_lyrics(path, raw, sizeof raw) <= 0){
+        char lrc[600]; snprintf(lrc, sizeof lrc, "%s", path);
+        char *dot = strrchr(lrc, '.'), *sl = strrchr(lrc, '/');
+        if(dot && (!sl || dot > sl)) strcpy(dot, ".lrc"); else strncat(lrc, ".lrc", sizeof lrc - strlen(lrc) - 1);
+        FILE *f = fopen(lrc, "rb");
+        if(f){ size_t got = fread(raw, 1, sizeof raw - 1, f); raw[got] = 0; fclose(f); }
+    }
+    char *line = raw;
+    while(line && *line && n < cap){
+        char *nl = strpbrk(line, "\r\n");
+        if(nl){ *nl = 0; }
+        long stamps[8]; int ns = 0; const char *p = line; int used;
+        while(ns < 8 && (used = lrc_stamp(p, &stamps[ns])) > 0){ p += used; ns++; }
+        while(*p == ' ' || *p == '\t') p++;
+        for(int k = 0; k < ns && n < cap; k++){
+            out[n].ms = stamps[k];
+            snprintf(out[n].text, sizeof out[n].text, "%.119s", p);
+            int L = (int)strlen(out[n].text);                  /* never leave half a UTF-8 character */
+            if(L == (int)sizeof out[n].text - 1) while(L > 0 && ((unsigned char)out[n].text[L-1] & 0xC0) == 0x80) out[n].text[--L] = 0;
+            if(L > 0 && ((unsigned char)out[n].text[L-1] & 0xE0) == 0xC0 && L == (int)sizeof out[n].text - 1) out[n].text[--L] = 0;
+            n++;
+        }
+        line = nl ? nl + 1 : NULL;
+        while(line && (*line == '\r' || *line == '\n')) line++;
+    }
+    for(int i = 1; i < n; i++){                              /* insertion sort by time (repeat stamps) */
+        lyr_line_t t = out[i]; int j = i - 1;
+        while(j >= 0 && out[j].ms > t.ms){ out[j+1] = out[j]; j--; }
+        out[j+1] = t;
+    }
+    return n;
 }

@@ -196,7 +196,7 @@ int mdb_load(void){
     sqlite3_stmt *st;
     const char *sql =
         "SELECT IFNULL(TITLE,IFNULL(NAME,'Untitled')),IFNULL(ARTIST,''),IFNULL(ALBUM,''),"
-        "IFNULL(DURATION,0),ID,IFNULL(GENRE,'') FROM SONG "
+        "IFNULL(DURATION,0),ID,IFNULL(GENRE,''),IFNULL(DISC,0),IFNULL(TRACK,0) FROM SONG "
         "WHERE lower(PATH) NOT LIKE '%.m4b' "   /* audiobooks live in the Books view, not the music lists */
         "ORDER BY 1 COLLATE NOCASE;";
     if(sqlite3_prepare_v2(d, sql, -1, &st, NULL) != SQLITE_OK){ g_load_err = 1; return 0; }
@@ -209,6 +209,9 @@ int mdb_load(void){
         s->dur_ms = sqlite3_column_int(st,3);
         s->id     = sqlite3_column_int(st,4);
         snprintf(s->genre,  MDB_STR, "%s", colt(st,5));
+        s->disc  = sqlite3_column_int(st,6);   /* "1/2"-style text reads as its leading number */
+
+        s->track = sqlite3_column_int(st,7);
         trim(s->title); trim(s->artist); trim(s->album); trim(s->genre);
     }
     /* rc==ROW means we stopped only because the buffer filled (more rows than COUNT -> a benign
@@ -688,7 +691,7 @@ int mdb_books(book_t *out, int max){
     sqlite3_stmt *st;
     const char *sql =
         "SELECT S.ID, IFNULL(S.TITLE,IFNULL(S.NAME,'Untitled')), IFNULL(S.ARTIST,''), S.PATH, "
-        "IFNULL(B.POSITION_MS,0), IFNULL(B.COMPLETED,0) "
+        "IFNULL(B.POSITION_MS,0), IFNULL(B.COMPLETED,0), IFNULL(S.DURATION,0) "
         "FROM BOOKS S LEFT JOIN BOOK_PROGRESS B ON B.BOOK_KEY = S.PATH "
         "ORDER BY IFNULL(B.UPDATED_AT,0) DESC, IFNULL(S.ADD_TIME,0) DESC, S.ID DESC;";
     if(sqlite3_prepare_v2(d, sql, -1, &st, NULL) != SQLITE_OK) return -1;
@@ -701,6 +704,7 @@ int mdb_books(book_t *out, int max){
         snprintf(b->path, sizeof b->path, "%s", colt(st, 3));
         b->position_ms = (long)sqlite3_column_int64(st, 4);
         b->completed   = sqlite3_column_int(st, 5);
+        b->duration_ms = (long)sqlite3_column_int64(st, 6);
         trim(b->title); trim(b->author);
     }
     int err = (n == 0 && rc != SQLITE_DONE && rc != SQLITE_ROW);   /* first step errored (not "no rows") -> report as error */
@@ -767,6 +771,8 @@ int mdb_book_save(const char *key, const char *member_path, long position_ms, in
  * mq_player restart needed), and a member with no SONG row still builds + decodes. This idempotently
  * ensures the reserved registry row exists and sets its single member to `path`, copying the book's
  * metadata from SONG when present, else a bare-path row. Returns 1 on success. */
+static int pl_is_queue(sqlite3 *d, long pid);     /* the Queue plays in the order added (below) */
+#define PL_ORDER(d, pid) ((void)(d), (void)(pid), "PATH, TRACK")   /* every playlist: path order */
 int mdb_reserved_slot_set(const char *path){
     sqlite3 *d = db(); if(!d || !path || !*path) return 0;
     if(sqlite3_exec(d, "BEGIN IMMEDIATE;", 0, 0, 0) != SQLITE_OK) return 0;
@@ -818,10 +824,11 @@ int mdb_reserved_slot_set_playlist(long pid){
     if(ok && sqlite3_exec(d, "DELETE FROM CUSTOM_PLAYLIST WHERE PLAYLIST_ID=" XSTR(DISKOS_RSV_LISTID) ";", 0, 0, 0) != SQLITE_OK) ok = 0;
     if(ok){
         sqlite3_stmt *st;
-        const char *sql =
+        char sql[700];
+        snprintf(sql, sizeof sql,
             "INSERT INTO CUSTOM_PLAYLIST (PLAYLIST_ID,PATH,NAME,TITLE,ALBUM,ARTIST,GENRE,DISC,TRACK,IS_CUE,IS_ISO,IS_DSD,OFFSET,DURATION,ALBUM_ARTIST) "
             "SELECT " XSTR(DISKOS_RSV_LISTID) ",PATH,NAME,TITLE,ALBUM,ARTIST,GENRE,DISC,TRACK,IS_CUE,IS_ISO,IS_DSD,OFFSET,"
-            "(CASE WHEN DURATION>0 THEN DURATION ELSE 86400000 END),ALBUM_ARTIST FROM CUSTOM_PLAYLIST WHERE PLAYLIST_ID=?1;";
+            "(CASE WHEN DURATION>0 THEN DURATION ELSE 86400000 END),ALBUM_ARTIST FROM CUSTOM_PLAYLIST WHERE PLAYLIST_ID=?1 ORDER BY %s;", PL_ORDER(d, pid));
         if(sqlite3_prepare_v2(d, sql, -1, &st, NULL) == SQLITE_OK){
             sqlite3_bind_int64(st, 1, (sqlite3_int64)pid);
             if(sqlite3_step(st) != SQLITE_DONE) ok = 0; else n = sqlite3_changes(d);
@@ -889,6 +896,17 @@ int mdb_unfavorite(int id){
     int changed = sqlite3_changes(d);
     sqlite3_finalize(st);
     return rc == SQLITE_DONE && changed > 0;   /* true only if a MY_LOVE row was removed */
+}
+
+/* The Queue plays, lists and removes in the order songs were ADDED (row id); every other playlist keeps its
+ * path order. The player plays the copy in the exact order it's handed (verified on device: LIST_SONG_0 numbers
+ * rows in the playback slot's row order), so the copy below follows this too. */
+__attribute__((unused)) static int pl_is_queue(sqlite3 *d, long pid){
+    sqlite3_stmt *st; int q = 0;
+    if(pid <= 0 || sqlite3_prepare_v2(d, "SELECT 1 FROM PLAYLIST_INFO WHERE ID=? AND NAME='Queue' LIMIT 1;", -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(st, 1, pid);
+    q = sqlite3_step(st) == SQLITE_ROW; sqlite3_finalize(st);
+    return q;
 }
 
 /* ---- custom playlists (PLAYLIST_INFO + CUSTOM_PLAYLIST) ------------------ */
@@ -1135,9 +1153,9 @@ int mdb_playlist_remove_at(long pid, int position){
     if(pid<=0 || position<=0) return 0;
     sqlite3 *d = db(); if(!d) return 0;
     sqlite3_stmt *st;
-    const char *sql =
-        "DELETE FROM CUSTOM_PLAYLIST WHERE ID = ("
-        "SELECT ID FROM CUSTOM_PLAYLIST WHERE PLAYLIST_ID=?1 ORDER BY PATH, TRACK LIMIT 1 OFFSET ?2);";
+    char sql[240];
+    snprintf(sql, sizeof sql, "DELETE FROM CUSTOM_PLAYLIST WHERE ID = ("
+             "SELECT ID FROM CUSTOM_PLAYLIST WHERE PLAYLIST_ID=?1 ORDER BY %s LIMIT 1 OFFSET ?2);", PL_ORDER(d, pid));
     if(sqlite3_prepare_v2(d, sql, -1, &st, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_int64(st, 1, pid);
     sqlite3_bind_int(st, 2, position-1);
@@ -1243,7 +1261,8 @@ int mdb_playlist_export(long pid, const char *name, char *outname, int cap){
         if(nm1[0] && fprintf(f, "#PLAYLIST:%s\n", nm1) < 0) ok = 0;
     }
     sqlite3_stmt *st = NULL;
-    if(sqlite3_prepare_v2(d, "SELECT PATH FROM CUSTOM_PLAYLIST WHERE PLAYLIST_ID=? ORDER BY PATH, TRACK;", -1, &st, NULL) == SQLITE_OK){
+    char xsql[160]; snprintf(xsql, sizeof xsql, "SELECT PATH FROM CUSTOM_PLAYLIST WHERE PLAYLIST_ID=? ORDER BY %s;", PL_ORDER(d, pid));
+    if(sqlite3_prepare_v2(d, xsql, -1, &st, NULL) == SQLITE_OK){
         if(sqlite3_bind_int64(st, 1, pid) == SQLITE_OK){
             int rc;
             while((rc = sqlite3_step(st)) == SQLITE_ROW){ const char *p = colt(st,0); if(p && p[0] && fprintf(f, "%s\n", p) < 0) ok = 0; }
@@ -1475,9 +1494,9 @@ int mdb_playlist_songs(long pid, mdb_song_t *out, int cap){
     if(pid<=0) return 0;
     sqlite3 *d = db(); if(!d) return 0;
     sqlite3_stmt *st;
-    const char *sql =
-        "SELECT IFNULL(TITLE,IFNULL(NAME,'Untitled')),IFNULL(ARTIST,''),IFNULL(DURATION,0) "
-        "FROM CUSTOM_PLAYLIST WHERE PLAYLIST_ID=? ORDER BY PATH, TRACK;";
+    char sql[320];
+    snprintf(sql, sizeof sql, "SELECT IFNULL(TITLE,IFNULL(NAME,'Untitled')),IFNULL(ARTIST,''),IFNULL(DURATION,0) "
+             "FROM CUSTOM_PLAYLIST WHERE PLAYLIST_ID=? ORDER BY %s;", PL_ORDER(d, pid));
     if(sqlite3_prepare_v2(d, sql, -1, &st, NULL) != SQLITE_OK) return 0;
     sqlite3_bind_int64(st, 1, pid);
     int n=0;
@@ -1770,4 +1789,245 @@ int mdb_search(const char *q, const mdb_song_t **out, int cap){
             out[n++] = s;
     }
     return n;
+}
+
+/* The parametric-lite reader for the round EQ: per band its frequency (Hz) and gain in TENTHS of a dB,
+ * plus the stored master gain. *editable = 1 when every band is a peaking filter (filterType 0) with the
+ * fixed Q 0.7 and sane values - i.e. the round editor (free frequency, 0.1 dB gain, fixed Q) can round-trip
+ * it without losing anything. Returns 1 found, 0 absent (flat), -1 read failed. */
+static int peq_tok_tenths(const char *js, const jsmntok_t *t, int *out){   /* "-3.25" -> -33 (rounded) */
+    const char *p = js + t->start, *end = js + t->end; int neg = 0; long ip = 0, fr = 0, fd = 0;
+    if(p < end && *p == '-'){ neg = 1; p++; }
+    if(p >= end || *p < '0' || *p > '9') return 0;
+    while(p < end && *p >= '0' && *p <= '9'){ if(ip < 100000) ip = ip * 10 + (*p - '0'); p++; }
+    if(p < end && *p == '.'){ p++; while(p < end && *p >= '0' && *p <= '9'){ if(fd < 2){ fr = fr * 10 + (*p - '0'); fd++; } p++; } }
+    if(p != end) return 0;
+    if(fd == 1) fr *= 10;                                  /* hundredths */
+    long v = ip * 10 + (fr + 5) / 10; if(v > 1000) return 0;
+    *out = (int)(neg ? -v : v); return 1;
+}
+int mdb_get_peq_ex(int style_preset, double *master_out, int *tenths_out, int *freq_out, int *editable_out){
+    static const int GFREQ[10] = {32,64,125,250,500,1000,2000,4000,8000,16000};
+    for(int i = 0; i < 10; i++){ if(tenths_out) tenths_out[i] = 0; if(freq_out) freq_out[i] = GFREQ[i]; }
+    if(master_out) *master_out = 0;
+    if(editable_out) *editable_out = 1;
+    sqlite3 *d = db(); if(!d) return -1;
+    sqlite3_stmt *st;
+    if(sqlite3_prepare_v2(d, "SELECT MASTER_GAIN, PARAMS_JSON FROM PEQ WHERE STYLE_PRESET=?;", -1, &st, NULL) != SQLITE_OK) return -1;
+    sqlite3_bind_int(st, 1, style_preset);
+    int rc = sqlite3_step(st), found = 0, ed = 1;
+    if(rc == SQLITE_ROW){
+        found = 1;
+        if(master_out) *master_out = sqlite3_column_double(st, 0);
+        const char *js = (const char*)sqlite3_column_text(st, 1);
+        int jlen = js ? sqlite3_column_bytes(st, 1) : 0;
+        if(js){
+            jsmn_parser jp; jsmntok_t tok[256]; jsmn_init(&jp);
+            int nt = jsmn_parse(&jp, js, jlen, tok, (unsigned)(sizeof tok / sizeof tok[0]));
+            if(nt < 1 || tok[0].type != JSMN_ARRAY || tok[0].size != 10) ed = 0;
+            else {
+                int ti = 1;
+                for(int band = 0; band < 10; band++){
+                    if(ti >= nt || tok[ti].type != JSMN_OBJECT){ ed = 0; break; }
+                    int nf = tok[ti].size; ti++;
+                    for(int f = 0; f < nf && ti + 1 < nt; f++){
+                        const jsmntok_t *k = &tok[ti], *val = &tok[ti + 1]; long v; int tv;
+                        if(val->type == JSMN_OBJECT || val->type == JSMN_ARRAY){ ed = 0; ti += 2; continue; }
+                        if(peq_key_is(js, k, "filterType")){ if(!peq_tok_int(js, val, &v) || v != 0) ed = 0; }
+                        else if(peq_key_is(js, k, "frequency")){ if(peq_tok_int(js, val, &v) && v >= 20 && v <= 20000){ if(freq_out) freq_out[band] = (int)v; } else ed = 0; }
+                        else if(peq_key_is(js, k, "qValue")){ if(!(val->end - val->start == 3 && strncmp(js + val->start, "0.7", 3) == 0)) ed = 0; }
+                        else if(peq_key_is(js, k, "gain")){ if(peq_tok_tenths(js, val, &tv) && tv >= -120 && tv <= 120){ if(tenths_out) tenths_out[band] = tv; } else ed = 0; }
+                        ti += 2;
+                    }
+                }
+            }
+        }
+    }
+    sqlite3_finalize(st);
+    if(editable_out) *editable_out = ed;
+    if(!found && rc != SQLITE_DONE) return -1;
+    return found;
+}
+
+/* ---- queue / song-menu helpers --------------------------------------------------------------------- */
+/* Add every song under a folder (recursively) to a playlist. Returns the number added. */
+int mdb_playlist_add_folder(long pid, const char *dir){
+    if(pid <= 0 || !dir || !dir[0]) return 0;
+    sqlite3 *d = db(); if(!d) return 0;
+    char pat[700]; size_t k = 0;                                   /* dir + "/%", with LIKE's specials escaped */
+    for(const char *p = dir; *p && k < sizeof pat - 4; p++){ if(*p == '%' || *p == '_' || *p == '\\') pat[k++] = '\\'; pat[k++] = *p; }
+    pat[k++] = '/'; pat[k++] = '%'; pat[k] = 0;
+    sqlite3_stmt *st;
+    if(sqlite3_prepare_v2(d, "INSERT OR IGNORE INTO CUSTOM_PLAYLIST (" PL_COLS ") SELECT ?," PL_SRC " FROM SONG WHERE PATH LIKE ? ESCAPE '\\' AND lower(PATH) NOT LIKE '%.m4b' ORDER BY PATH;",
+                          -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(st, 1, pid);
+    sqlite3_bind_text(st, 2, pat, -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(st); sqlite3_finalize(st);
+    return (rc == SQLITE_DONE) ? sqlite3_changes(d) : 0;
+}
+/* Each song under a folder: cb(ud, path, title, artist, album, dur_ms). Returns the count. */
+int mdb_folder_rows(const char *dir, void (*cb)(void *ud, const char *path, const char *title, const char *artist, const char *album, long dur), void *ud){
+    if(!dir || !dir[0] || !cb) return 0;
+    sqlite3 *d = db(); if(!d) return 0;
+    char pat[700]; size_t k = 0;
+    for(const char *p = dir; *p && k < sizeof pat - 4; p++){ if(*p == '%' || *p == '_' || *p == '\\') pat[k++] = '\\'; pat[k++] = *p; }
+    pat[k++] = '/'; pat[k++] = '%'; pat[k] = 0;
+    sqlite3_stmt *st;
+    if(sqlite3_prepare_v2(d, "SELECT PATH, IFNULL(TITLE,IFNULL(NAME,'')), IFNULL(ARTIST,''), IFNULL(ALBUM,''), IFNULL(DURATION,0) "
+                             "FROM SONG WHERE PATH LIKE ? ESCAPE '\\' ORDER BY PATH;", -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, pat, -1, SQLITE_TRANSIENT);
+    int n = 0;
+    while(sqlite3_step(st) == SQLITE_ROW){
+        cb(ud, (const char*)sqlite3_column_text(st, 0), (const char*)sqlite3_column_text(st, 1),
+           (const char*)sqlite3_column_text(st, 2), (const char*)sqlite3_column_text(st, 3), (long)sqlite3_column_int64(st, 4));
+        n++;
+    }
+    sqlite3_finalize(st);
+    return n;
+}
+/* One song by its path: title/artist/album/duration/id. 1 found, 0 not. */
+int mdb_song_by_path(const char *path, mdb_song_t *out){
+    if(!path || !path[0] || !out) return 0;
+    sqlite3 *d = db(); if(!d) return 0;
+    sqlite3_stmt *st;
+    if(sqlite3_prepare_v2(d, "SELECT ID, IFNULL(TITLE,IFNULL(NAME,'')), IFNULL(ARTIST,''), IFNULL(ALBUM,''), IFNULL(DURATION,0) FROM SONG WHERE PATH=? LIMIT 1;",
+                          -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+    int found = 0;
+    if(sqlite3_step(st) == SQLITE_ROW){
+        memset(out, 0, sizeof *out); found = 1;
+        out->id = sqlite3_column_int(st, 0);
+        snprintf(out->title, sizeof out->title, "%s", (const char*)sqlite3_column_text(st, 1));
+        snprintf(out->artist, sizeof out->artist, "%s", (const char*)sqlite3_column_text(st, 2));
+        snprintf(out->album, sizeof out->album, "%s", (const char*)sqlite3_column_text(st, 3));
+        out->dur_ms = sqlite3_column_int(st, 4);
+    }
+    sqlite3_finalize(st);
+    return found;
+}
+/* The scanner's bitrate (bits/s) and sample rate for a path; 0 where unknown. */
+int mdb_song_rates(const char *path, int *bitrate, int *srate){
+    if(bitrate) *bitrate = 0;
+    if(srate) *srate = 0;
+    if(!path || !path[0]) return 0;
+    sqlite3 *d = db(); if(!d) return 0;
+    sqlite3_stmt *st;
+    if(sqlite3_prepare_v2(d, "SELECT IFNULL(BIT_RATE,0), IFNULL(SAMPLE_RATE,0) FROM SONG WHERE PATH=? LIMIT 1;", -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+    int ok = 0;
+    if(sqlite3_step(st) == SQLITE_ROW){ ok = 1; if(bitrate) *bitrate = sqlite3_column_int(st, 0); if(srate) *srate = sqlite3_column_int(st, 1); }
+    sqlite3_finalize(st);
+    return ok;
+}
+/* Favourites by path (for songs other than the playing one). MY_LOVE mirrors SONG's columns; the insert
+ * copies exactly the columns both tables share, so it follows whatever schema the player's DB has. */
+int mdb_is_favorite_path(const char *path){
+    if(!path || !path[0]) return 0;
+    sqlite3 *d = db(); if(!d) return 0;
+    sqlite3_stmt *st; int r = 0;
+    if(sqlite3_prepare_v2(d, "SELECT 1 FROM MY_LOVE WHERE PATH=? LIMIT 1;", -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+    r = sqlite3_step(st) == SQLITE_ROW; sqlite3_finalize(st);
+    return r;
+}
+int mdb_set_favorite_path(const char *path, int on){
+    if(!path || !path[0]) return 0;
+    sqlite3 *d = db(); if(!d) return 0;
+    sqlite3_stmt *st;
+    if(!on){
+        if(sqlite3_prepare_v2(d, "DELETE FROM MY_LOVE WHERE PATH=?;", -1, &st, NULL) != SQLITE_OK) return 0;
+        sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+        int rc = sqlite3_step(st); sqlite3_finalize(st); return rc == SQLITE_DONE;
+    }
+    if(mdb_is_favorite_path(path)) return 1;
+    char cols[1500] = ""; size_t cl = 0;
+    if(sqlite3_prepare_v2(d, "SELECT name FROM pragma_table_info('MY_LOVE') WHERE name IN (SELECT name FROM pragma_table_info('SONG')) AND name<>'ID';",
+                          -1, &st, NULL) != SQLITE_OK) return 0;
+    while(sqlite3_step(st) == SQLITE_ROW && cl < sizeof cols - 80){
+        const char *c = (const char*)sqlite3_column_text(st, 0);
+        int ok = 1; for(const char *q = c; *q; q++) if(!((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9') || *q == '_')) ok = 0;
+        if(ok) cl += (size_t)snprintf(cols + cl, sizeof cols - cl, "%s%s", cl ? "," : "", c);
+    }
+    sqlite3_finalize(st);
+    if(!cl || !strstr(cols, "PATH")) return 0;
+    char sql[3200]; snprintf(sql, sizeof sql, "INSERT INTO MY_LOVE (%s) SELECT %s FROM SONG WHERE PATH=? LIMIT 1;", cols, cols);
+    if(sqlite3_prepare_v2(d, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(st); sqlite3_finalize(st);
+    return rc == SQLITE_DONE && sqlite3_changes(d) > 0;
+}
+/* 1-based position of a path in a playlist, in the same order the playlist view and playback use
+ * (ORDER BY PATH, TRACK); 0 if absent. */
+int mdb_playlist_index_of(long pid, const char *path){
+    if(pid <= 0 || !path || !path[0]) return 0;
+    sqlite3 *d = db(); if(!d) return 0;
+    sqlite3_stmt *st;
+    char isql[160]; snprintf(isql, sizeof isql, "SELECT PATH FROM CUSTOM_PLAYLIST WHERE PLAYLIST_ID=? ORDER BY %s;", PL_ORDER(d, pid));
+    if(sqlite3_prepare_v2(d, isql, -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(st, 1, pid);
+    int i = 0, at = 0;
+    while(sqlite3_step(st) == SQLITE_ROW){ i++; const char *p = (const char*)sqlite3_column_text(st, 0); if(p && !strcmp(p, path)){ at = i; break; } }
+    sqlite3_finalize(st);
+    return at;
+}
+
+/* ---- the up-next queue ------------------------------------------------------------------------------ */
+/* The player's live list (LIST_SONG_0), in its play order. Returns the count (0 if none). */
+int mdb_listsong0_paths(char (*out)[256], int cap){
+    sqlite3 *d = db(); if(!d || cap <= 0) return 0;
+    sqlite3_stmt *st; int n = 0;
+    if(sqlite3_prepare_v2(d, "SELECT PATH FROM LIST_SONG_0 ORDER BY ID;", -1, &st, NULL) != SQLITE_OK) return 0;
+    while(n < cap && sqlite3_step(st) == SQLITE_ROW){
+        const char *p = (const char*)sqlite3_column_text(st, 0);
+        if(p && p[0]) snprintf(out[n++], 256, "%s", p);
+    }
+    sqlite3_finalize(st);
+    return n;
+}
+/* Fill the playback slot with exactly these songs, in this order (each looked up in SONG by path; a path
+ * that isn't in the library is skipped). *have_first = 1 if paths[0] made it in. Returns rows written. */
+int mdb_reserved_slot_set_paths(char (*paths)[256], int n, int *have_first){
+    if(have_first) *have_first = 0;
+    sqlite3 *d = db(); if(!d || n <= 0) return 0;
+    if(sqlite3_exec(d, "BEGIN IMMEDIATE;", 0, 0, 0) != SQLITE_OK) return 0;
+    int ok = 1, w = 0;
+    if(sqlite3_exec(d, "INSERT OR IGNORE INTO CUSTOM_PLAYLIST_INDEX (LIST_ID,LIST_NAME,M3U_PATH) VALUES ("
+                       XSTR(DISKOS_RSV_LISTID) ",'diskos-book','');", 0, 0, 0) != SQLITE_OK) ok = 0;
+    if(ok && sqlite3_exec(d, "DELETE FROM CUSTOM_PLAYLIST WHERE PLAYLIST_ID=" XSTR(DISKOS_RSV_LISTID) ";", 0, 0, 0) != SQLITE_OK) ok = 0;
+    sqlite3_stmt *st = NULL;
+    if(ok && sqlite3_prepare_v2(d,
+        "INSERT OR IGNORE INTO CUSTOM_PLAYLIST (PLAYLIST_ID,PATH,NAME,TITLE,ALBUM,ARTIST,GENRE,DISC,TRACK,IS_CUE,IS_ISO,IS_DSD,OFFSET,DURATION,ALBUM_ARTIST) "
+        "SELECT " XSTR(DISKOS_RSV_LISTID) ",PATH,NAME,TITLE,ALBUM,ARTIST,GENRE,DISC,TRACK,IS_CUE,IS_ISO,IS_DSD,OFFSET,"
+        "(CASE WHEN DURATION>0 THEN DURATION ELSE 86400000 END),ALBUM_ARTIST FROM SONG WHERE PATH=? LIMIT 1;", -1, &st, NULL) != SQLITE_OK) ok = 0;
+    for(int i = 0; ok && i < n; i++){
+        sqlite3_reset(st); sqlite3_bind_text(st, 1, paths[i], -1, SQLITE_TRANSIENT);
+        if(sqlite3_step(st) != SQLITE_DONE){ ok = 0; break; }
+        if(sqlite3_changes(d) > 0){ w++; if(i == 0 && have_first) *have_first = 1; }
+    }
+    if(st) sqlite3_finalize(st);
+    if(ok && w > 0 && sqlite3_exec(d, "COMMIT;", 0, 0, 0) == SQLITE_OK) return w;
+    sqlite3_exec(d, "ROLLBACK;", 0, 0, 0);
+    if(have_first) *have_first = 0;
+    return 0;
+}
+/* A file or folder was renamed / moved: point every playlist entry under it at the new place. */
+int mdb_playlist_paths_moved(const char *oldp, const char *newp){
+    sqlite3 *d = db(); if(!d || !oldp || !newp || !oldp[0]) return 0;
+    sqlite3_stmt *st;
+    if(sqlite3_prepare_v2(d, "UPDATE CUSTOM_PLAYLIST SET PATH = ?2 || substr(PATH, length(?1) + 1) "
+                             "WHERE PLAYLIST_ID<>" XSTR(DISKOS_RSV_LISTID) " AND (PATH = ?1 OR substr(PATH, 1, length(?1) + 1) = ?1 || '/');",
+                          -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, oldp, -1, SQLITE_TRANSIENT); sqlite3_bind_text(st, 2, newp, -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(st); sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? sqlite3_changes(d) : 0;
+}
+/* A file or folder was deleted: drop every playlist entry under it. */
+int mdb_playlist_paths_removed(const char *p){
+    sqlite3 *d = db(); if(!d || !p || !p[0]) return 0;
+    sqlite3_stmt *st;
+    if(sqlite3_prepare_v2(d, "DELETE FROM CUSTOM_PLAYLIST WHERE PLAYLIST_ID<>" XSTR(DISKOS_RSV_LISTID)
+                             " AND (PATH = ?1 OR substr(PATH, 1, length(?1) + 1) = ?1 || '/');", -1, &st, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(st, 1, p, -1, SQLITE_TRANSIENT);
+    int rc = sqlite3_step(st); sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? sqlite3_changes(d) : 0;
 }

@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "theme.h"
+#include "curvelist.h"
+#include "orbit.h"
 #include "config.h"
 #include "anim.h"
 #include "musicdb.h"
@@ -69,6 +72,8 @@ static void apply_sleep(int idx){
     ui_set_sleep_timer((idx>=0 && idx<6) ? M[idx] : 0);
 }
 static void apply_np_style(int v){ ui_set_np_style(v); }
+static void apply_autooff(int v){ (void)v; }   /* the main loop reads autooff_idx live */
+static void apply_autotag(int v){ (void)v; }   /* read live by the main loop */
 static void apply_rescan(int v){ (void)v;
     ui_rescan_library();
     /* 0622 has no completion oracle, so we can't say when/whether it finished -
@@ -161,7 +166,7 @@ static void apply_restart(int v){ (void)v;
     lv_obj_set_style_text_color(s, lv_color_hex(0x8E8E93), 0);
     lv_obj_align(s, LV_ALIGN_TOP_MID, 0, 50);
     boot_modal_pill(card, -58, "Cancel",  0xC7C7CC, boot_cancel_cb);
-    boot_modal_pill(card,  58, "Restart", 0xF23260, boot_confirm_cb);
+    boot_modal_pill(card,  58, "Restart", UI_RED, boot_confirm_cb);
 }
 /* write the backlight sysfs only (no config change) - used for transient dimming.
  * v==0 fully powers the panel backlight DOWN: writing brightness 0 alone leaves the
@@ -183,7 +188,21 @@ void settings_apply_startup(void){
     apply_brightness(cfg_get_int("brightness", 16));
     cfg_set_int("sleep_idx", 0);   /* never auto-arm a sleep timer across reboots */
     apply_boot_default(cfg_get_int("boot_default", 0));  /* keep the boot-hook flag in sync */
-    ui_set_accent_config(cfg_get_int("accent_mode", 0), cfg_get_int("accent_color", 0xF23260));
+    /* switch to the fixed diskOS red once; a later pick in Display > Accent Colour sticks */
+    if(!cfg_get_int("np_poster_v1", 0)){          /* this fork's Now Playing is the Poster style, once */
+        cfg_set_int("np_style", 2);
+        cfg_set_int("np_poster_v1", 1);
+    }
+    if(!cfg_get_int("saver_ring_v1", 0)){             /* the Dim Ring clock becomes the screensaver once */
+        cfg_set_int("saver_style", 5);
+        cfg_set_int("saver_ring_v1", 1);
+    }
+    if(!cfg_get_int("accent_red_v1", 0)){
+        cfg_set_int("accent_mode", 1);
+        cfg_set_int("accent_color", UI_RED);
+        cfg_set_int("accent_red_v1", 1);
+    }
+    ui_set_accent_config(cfg_get_int("accent_mode", 1), cfg_get_int("accent_color", UI_RED));
     apply_artcache(cfg_get_int("artcache", 0));          /* prewarm off by default */
 }
 
@@ -205,10 +224,11 @@ static const char *const OPT_MODE[] = { "Sequential", "Shuffle", "Repeat One", "
 static const char *const OPT_EQ[]   = { "Off","Jazz","Rock","R&B","Hip-Hop","Pop","Dance","Classical","Retro","Sibilance 1","Sibilance 2",
                                         "USER1","USER2","USER3","USER4","USER5","USER6","USER7","USER8","USER9","USER10" };
 static const char *const OPT_SLEEP[] = { "Off","15 min","30 min","45 min","60 min","90 min" };
+static const char *const OPT_AUTOOFF[] = { "Off","10 min","20 min","30 min","60 min" };
 static const char *const OPT_POWER[] = { "Off","30 sec","1 min","2 min","5 min" };  /* idx->TMAP secs in main.c */
-static const char *const OPT_NPSTYLE[] = { "Cover", "Vinyl" };
+static const char *const OPT_NPSTYLE[] = { "Cover", "Vinyl", "Poster", "Ring" };
 static const char *const OPT_ALBUMVIEW[] = { "List", "Cover Flow" };
-static const char *const OPT_SAVERSTYLE[] = { "Cover", "Analog", "Minimal", "Digital", "Vinyl" };
+static const char *const OPT_SAVERSTYLE[] = { "Cover", "Analog", "Minimal", "Digital", "Vinyl", "Ring" };
 static const char *const OPT_BOOTDEF[] = { "diskOS", "Stock" };
 static const char *const OPT_ARTCACHE[] = { "Covers only","When Idle","Idle & Charging" };
 
@@ -216,6 +236,7 @@ static const char *const OPT_ARTCACHE[] = { "Covers only","When Idle","Idle & Ch
 const char *ui_eq_name(int i){ return (i >= 0 && i < 21) ? OPT_EQ[i] : "Off"; }
 /* audio cluster cyclers - all use min=-1 so the value can be "System default" (unmanaged) */
 static const char *const OPT_DRE[]    = { "Off", "On" };
+static const char *const OPT_AUTOTAG[] = { "Off", "On" };
 static const char *const OPT_REPLAYGAIN[] = { "Off", "Track", "Album" };
 static const char *const OPT_GAIN[]   = { "Low", "High" };
 static const char *const OPT_DFILTER[]= { "Fast LL","Slow LL","Slow PC","Fast PC","NOS","Wideband" };
@@ -244,6 +265,8 @@ static const setting_t TABLE[] = {
       "How the player advances through tracks.", D_MODE },
     { "Playback", "Equalizer",   ST_CYCLER, "eq_preset", 0,0,0, OPT_EQ,  21, NULL, apply_eq,   0,
       "Tone preset sent to the player; audible effect is still being verified.", NULL },
+    { "Playback", "Auto-tag",    ST_CYCLER, "autotag", 0,0,0, OPT_AUTOTAG, 2, NULL, apply_autotag, 0,
+      "On Wi-Fi, a track that plays for 10 s and lacks synced lyrics or artwork gets them added to its tags. Not found: tried again on a later play, at most once a day.", NULL },
     { "Playback", "Custom EQ",    ST_ACTION, NULL, 0,0,0, NULL,0, LV_SYMBOL_RIGHT, apply_eq_custom, 0,
       "Adjust the 10-band custom EQ. Applies live and saves on the device.", NULL },
     { "Playback", "DSD Output",  ST_READONLY, NULL, 0,0,0, NULL,0, "Auto", NULL, 0,
@@ -275,7 +298,7 @@ static const setting_t TABLE[] = {
       "Screen backlight level.", NULL },
     { "Display",  "Quick Settings", ST_ACTION, NULL, 0,0,0, NULL,0, LV_SYMBOL_RIGHT, apply_qsconfig, 0,
       "Choose which tiles appear in the pull-down Quick Settings drawer.", NULL },
-    { "Display",  "Now Playing", ST_CYCLER, "np_style",   0,0,0, OPT_NPSTYLE, 2, NULL, apply_np_style, 0,
+    { "Display",  "Now Playing", ST_CYCLER, "np_style",   0,0,0, OPT_NPSTYLE, 4, NULL, apply_np_style, 0,
       "Album art style on the Now Playing screen.", D_NPSTYLE },
     { "Display",  "Album View",  ST_CYCLER, "album_view", 0,0,0, OPT_ALBUMVIEW, 2, NULL, NULL, 0,
       "How the Albums list looks: a text list, or a cover flow you flick through.", NULL },
@@ -285,7 +308,7 @@ static const setting_t TABLE[] = {
       "Pre-decode album art so covers load instantly. Background decoding can warm the player; it throttles on heat.", D_ARTCACHE },
     { "Display",  "Screensaver", ST_CYCLER, "saver_idx",  0,0,0, OPT_POWER, 5, NULL, NULL, 2,
       "Idle time before the clock screensaver appears and the screen dims.", NULL },
-    { "Display",  "Saver Style", ST_CYCLER, "saver_style", 0,0,0, OPT_SAVERSTYLE, 5, NULL, NULL, 0,
+    { "Display",  "Saver Style", ST_CYCLER, "saver_style", 0,0,0, OPT_SAVERSTYLE, 6, NULL, NULL, 0,
       "Screensaver look: Cover art, Analog clock, Minimal, Digital, or spinning Vinyl.", NULL },
     { "Display",  "Screen Off",  ST_CYCLER, "screenoff_idx", 0,0,0, OPT_POWER, 5, NULL, NULL, 3,
       "How long after the screensaver the screen turns fully off.", NULL },
@@ -303,6 +326,8 @@ static const setting_t TABLE[] = {
       "Pair Bluetooth devices. Audio routes to connected headphones or speakers (SBC, beta).", NULL },
     { "System",   "Sleep Timer", ST_CYCLER, "sleep_idx", 0,0,0, OPT_SLEEP, 6, NULL, apply_sleep, 0,
       "Pause playback after this long. Resets on restart.", NULL },
+    { "System",   "Auto Power-Off", ST_CYCLER, "autooff_idx", 0,0,0, OPT_AUTOOFF, 5, NULL, apply_autooff, 0,
+      "Switch the player off after this long with nothing playing and nobody using it. With the screen on, a 30 s countdown lets you cancel.", NULL },
     { "System",   "Rescan Library", ST_ACTION, NULL, 0,0,0, NULL,0, "Scan", apply_rescan, 0,
       "Re-scan the SD card for new or removed music.", NULL },
     { "System",   "Import Playlists", ST_ACTION, NULL, 0,0,0, NULL,0, "Import", apply_import_m3u, 0,
@@ -358,7 +383,7 @@ static void val_text(const setting_t *s, char *buf, int n){
 }
 
 /* ---- shared widgets ----------------------------------------------------- */
-#define ACCENT 0xFF375F
+#define ACCENT UI_RED
 
 static lv_obj_t *g_list_rows[N_SETTINGS];   /* value labels, to refresh in place */
 static const setting_t *g_active;           /* setting shown in the detail screen */
@@ -543,17 +568,18 @@ static lv_obj_t *make_list(lv_obj_t *root){
 static lv_obj_t *setting_card(lv_obj_t *list){
     lv_obj_t *row = lv_button_create(list);
     lv_obj_remove_style_all(row);
-    lv_obj_set_size(row, 288, 50);
-    lv_obj_set_style_radius(row, 12, 0);
-    lv_obj_set_style_bg_color(row, lv_color_hex(0x1C1C1E), 0);
+    lv_obj_set_size(row, 288, TH_ROW_H);
+    lv_obj_set_style_radius(row, TH_R_ROW, 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(TH_SURF1), 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_70, 0);
-    lv_obj_set_style_bg_color(row, lv_color_hex(0x2C2C2E), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(row, lv_color_hex(TH_SURF2), LV_STATE_PRESSED);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_USER_1);                         /* curves with the circle */
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     return row;
 }
 
 /* ---- top-level category list (SCR_SETTINGS): Playback / Audio / Display / Network / System ---- */
-static void cat_cb(lv_event_t *e){
+__attribute__((unused)) static void cat_cb(lv_event_t *e){
     if(lv_event_get_code(e)!=LV_EVENT_CLICKED) return;
     int gi = (int)(uintptr_t)lv_event_get_user_data(e);
     if(gi<0 || gi>=N_GROUPS) return;
@@ -561,29 +587,25 @@ static void cat_cb(lv_event_t *e){
     screen_show(SCR_SETLIST);   /* transition() rebuilds the rows via setlist_refresh */
 }
 
+static orbit_t g_set_orb;
+static void cat_pick(int gi){
+    if(gi == N_GROUPS){ screen_show(SCR_USAGE); return; }   /* Battery */
+    if(gi < 0 || gi >= N_GROUPS) return; g_active_group = GROUPS[gi]; screen_show(SCR_SETLIST); }
+static void hub_cb(lv_event_t *e){ list_back_cb(e); }
 void settings_create(lv_obj_t *root){
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
-    ui_header_cb(root, "Settings", list_back_cb);   /* shared header */
-
-    lv_obj_t *list = make_list(root);
-    for(int g=0; g<N_GROUPS; g++){
-        lv_obj_t *row = setting_card(list);
-        lv_obj_add_event_cb(row, cat_cb, LV_EVENT_CLICKED, (void*)(uintptr_t)g);
-
-        lv_obj_t *lbl = lv_label_create(row);
-        lv_label_set_text(lbl, GROUPS[g]);
-        lv_obj_set_pos(lbl, 18, 15);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
-
-        lv_obj_t *ch = lv_label_create(row);   /* drill-down chevron */
-        lv_obj_clear_flag(ch, LV_OBJ_FLAG_CLICKABLE);
-        lv_label_set_text(ch, LV_SYMBOL_RIGHT);
-        lv_obj_align(ch, LV_ALIGN_RIGHT_MID, -14, 0);
-        lv_obj_set_style_text_font(ch, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(ch, lv_color_hex(0x8E8E93), 0);
-    }
+    /* orbit: the five categories circle a grey-ringed hub; one sits at the bottom, the top holds the title */
+    orbit_title(root, "Settings");
+    static const char *GICON[N_GROUPS] = { LV_SYMBOL_PLAY, LV_SYMBOL_AUDIO, LV_SYMBOL_IMAGE,
+                                           LV_SYMBOL_WIFI, LV_SYMBOL_SETTINGS };
+    orbit_item_t it[N_GROUPS + 1];                          /* + Battery: the usage dial */
+    for(int g = 0; g < N_GROUPS; g++){ it[g].glyph = GICON[g]; it[g].cap = GROUPS[g]; }
+    it[N_GROUPS].glyph = LV_SYMBOL_BATTERY_3; it[N_GROUPS].cap = "Battery";
+    orbit_create(&g_set_orb, root, it, N_GROUPS + 1, -60, cat_pick);
+    for(int g = 0; g <= N_GROUPS; g++)                                  /* category icons in the accent */
+        lv_obj_set_style_text_color(g_set_orb.icon[g], lv_color_hex(TH_ACCENT), 0);
+    orbit_hub_create(&g_set_orb, root, hub_cb, LV_SYMBOL_SETTINGS, "Back");
 }
 
 /* Category list is static; nothing to re-sync when SCR_SETTINGS is (re)shown. */
@@ -600,6 +622,7 @@ void setlist_refresh(void){
     ui_header_cb(g_setlist_root, g_active_group, list_back_cb);   /* title = category; back pops to categories */
 
     lv_obj_t *list = make_list(g_setlist_root);
+    static curvelist_t cl; curvelist_attach(&cl, list, g_setlist_root, 288);   /* theme: every list curves + dots */
     for(int i=0;i<N_SETTINGS;i++){
         const setting_t *s = &TABLE[i];
         if(strcmp(s->group, g_active_group)) continue;   /* only rows in this category */
@@ -609,18 +632,20 @@ void setlist_refresh(void){
 
         lv_obj_t *lbl = lv_label_create(row);
         lv_label_set_text(lbl, s->label);
-        lv_obj_set_pos(lbl, 18, 15);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_16, 0);
+        lv_obj_set_pos(lbl, 18, 16);
+        lv_obj_set_style_text_font(lbl, TH_F_LIST, 0);
         lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
 
         char b[24]; val_text(s, b, sizeof b);
         lv_obj_t *vl = lv_label_create(row);
         lv_label_set_text(vl, b);
-        lv_obj_set_pos(vl, 150, 16);
-        lv_obj_set_size(vl, 120, 20);
+        lv_obj_set_pos(vl, 150, 18);
+        lv_obj_set_size(vl, 120, 22);
         lv_obj_set_style_text_align(vl, LV_TEXT_ALIGN_RIGHT, 0);
-        lv_obj_set_style_text_font(vl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(vl, TH_F_DETAIL, 0);
+        lv_obj_set_style_text_color(vl, lv_color_hex(TH_TXT2), 0);
         lv_obj_set_style_text_color(vl, lv_color_hex(s->type==ST_READONLY?0x8E8E93:0xC7C7CC), 0);
         g_list_rows[i] = vl;
     }
+    curvelist_update(&cl);
 }

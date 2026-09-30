@@ -29,6 +29,7 @@ typedef struct {
     char album[MDB_STR];
     char genre[MDB_STR];    /* GENRE field - used here as user mood/tag */
     int  dur_ms;
+    int  disc, track;       /* SONG.DISC / SONG.TRACK (0 = untagged); album lists sort by these */
 } mdb_song_t;
 
 /* Load the whole library once (one sqlite3 call). Safe to call repeatedly;
@@ -67,6 +68,7 @@ typedef struct {
     char path[512];             /* the .m4b file (also the book key) */
     long position_ms;           /* saved resume position (0 if none) */
     int  completed;
+    long duration_ms;           /* total length (0 if unknown) */
 } book_t;
 int  mdb_total_song_count(void);                            /* full SONG count incl. audiobooks (buffer sizing / empty check) */
 int  mdb_is_book_path(const char *path);                    /* 1 if this path is an audiobook (.m4b) */
@@ -110,6 +112,17 @@ long mdb_book_scope_set(const char *path);   /* point the reserved single-book p
 int  mdb_playlist_export(long pid, const char *name, char *outname, int cap);   /* write /tmp/sdcard/<name>.m3u; 1=ok */
 int  mdb_playlist_songs(long pid, mdb_song_t *out, int cap);
 int  mdb_playlist_count(long pid);
+int  mdb_playlist_add_folder(long pid, const char *dir);
+int  mdb_listsong0_paths(char (*out)[256], int cap);                       /* the player's live list, in play order */
+int  mdb_reserved_slot_set_paths(char (*paths)[256], int n, int *have_first);   /* the playback slot = exactly these */
+int  mdb_playlist_paths_moved(const char *oldp, const char *newp);         /* rename/move: follow in every playlist */
+int  mdb_playlist_paths_removed(const char *p);                           /* delete: drop from every playlist */
+int  mdb_playlist_index_of(long pid, const char *path);   /* 1-based, playback order; 0 absent */   /* every song under dir; returns count added */
+int  mdb_folder_rows(const char *dir, void (*cb)(void *ud, const char *path, const char *title, const char *artist, const char *album, long dur), void *ud);
+int  mdb_song_by_path(const char *path, mdb_song_t *out);  /* 1 found */
+int  mdb_song_rates(const char *path, int *bitrate, int *srate);   /* scanner's BIT_RATE (b/s), SAMPLE_RATE */
+int  mdb_is_favorite_path(const char *path);
+int  mdb_set_favorite_path(const char *path, int on);      /* any song, not just the playing one */
 /* scan a dir for *.m3u / *.m3u8 and import each new one as a playlist; returns # imported */
 int  mdb_import_m3u_dir(const char *dir);
 /* import from the SD root + any case-insensitive Music/Playlist(s) subdir; returns # imported */
@@ -131,5 +144,6 @@ int  mdb_set_peq(int style_preset, double master_gain, const char *params_json);
  * Returns 1 if the slot row exists, 0 if not. gains_out must hold >=10 ints. */
 int  mdb_get_peq(int style_preset, int *master_out, int *gains_out);   /* 1=found, 0=no slot (flat is real), -1=read FAILED */
 int  mdb_peq_is_graphic(int style_preset);   /* 1=graphic-editable (or empty), 0=parametric (don't overwrite), -1=read failed */
+int  mdb_get_peq_ex(int style_preset, double *master_out, int *tenths_out, int *freq_out, int *editable_out);   /* round EQ: Hz + 0.1 dB; 1/0/-1 */
 
 #endif

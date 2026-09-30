@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "ipc.h"
+#include "theme.h"
+#include "vlist.h"
 #include "musicdb.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -37,6 +40,46 @@ static void pl_set_transport_enabled(int on){
 }
 
 /* ---- song list ---------------------------------------------------------- */
+static mdb_song_t *g_pl_songs; static int g_pl_n;
+static lv_obj_t *g_menu_btn, *g_clear_btn; static int g_cur_id = -1; static uint32_t g_clear_armed;
+static void plv_reload(void);
+/* the Queue's Clear: tap, then tap again within 3 s ("Sure?") */
+static void clear_cb(lv_event_t *e){
+    if(lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    lv_obj_t *l = lv_obj_get_child(g_clear_btn, 0);
+    if(!g_clear_armed || lv_tick_elaps(g_clear_armed) > 3000){ g_clear_armed = lv_tick_get(); if(l) lv_label_set_text(l, "Sure?"); return; }
+    g_clear_armed = 0; if(l) lv_label_set_text(l, "Clear");
+    queue_clear(); ui_toast("Queue cleared"); plv_reload();
+}
+static vlist_t g_plv;
+static void plv_song_cb(lv_event_t *e);
+static void plv_remove_cb(lv_event_t *e);
+static void plv_add_row(int i){
+        if(i < 0 || i >= g_pl_n) return;
+        lv_obj_t *r = lv_button_create(g_song_list);
+        lv_obj_remove_style_all(r);
+        lv_obj_set_size(r, 280, 46);
+        lv_obj_set_style_radius(r, 8, 0);
+        lv_obj_set_style_bg_color(r, lv_color_hex(0x1C1C1E), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(r, LV_OPA_70, LV_STATE_PRESSED);
+        lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(r, plv_song_cb, LV_EVENT_SHORT_CLICKED, (void*)(intptr_t)(i+1));
+        lv_obj_add_event_cb(r, plv_remove_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)(i+1));  /* L32: hold to remove */
+        lv_obj_t *t = lv_label_create(r);
+        lv_label_set_text(t, g_pl_songs[i].title);
+        if(g_pl_songs[i].id == g_cur_id) lv_obj_set_style_text_color(t, ui_current_accent(), 0);   /* the playing song */
+        lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(t, 12, 5); lv_obj_set_size(t, 256, 19);
+        lv_obj_set_style_text_font(t, ui_font_cjk(16), 0);   /* CJK titles like Library/Search */
+        lv_obj_set_style_text_color(t, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_t *a = lv_label_create(r);
+        lv_label_set_text(a, g_pl_songs[i].artist);
+        lv_label_set_long_mode(a, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(a, 12, 25); lv_obj_set_size(a, 256, 16);
+        lv_obj_set_style_text_font(a, ui_font_cjk(14), 0);
+        lv_obj_set_style_text_color(a, lv_color_hex(0xC7C7CC), 0);
+}
+static void plv_scroll_cb(lv_event_t *e){ (void)e; vlist_follow(&g_plv); }
 static void plv_reload(void);   /* fwd */
 /* Long-press a song row -> remove it from the playlist (L32). Uses the 1-based display ordinal
  * bound to the row, matching mdb_playlist_songs()'s order. */
@@ -57,9 +100,18 @@ static void plv_song_cb(lv_event_t *e){
     screen_show(SCR_NOWPLAYING);
 }
 static void plv_reload(void){
+    {   /* the Queue gets Clear instead of the ... menu; the playing song is highlighted */
+        int q = 0;                                  /* (the queue has its own screen now) */
+        if(g_clear_btn){ if(q) lv_obj_remove_flag(g_clear_btn, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_clear_btn, LV_OBJ_FLAG_HIDDEN);
+                         lv_obj_t *l = lv_obj_get_child(g_clear_btn, 0); if(l) lv_label_set_text(l, "Clear"); g_clear_armed = 0; }
+        if(g_menu_btn){ if(q) lv_obj_add_flag(g_menu_btn, LV_OBJ_FLAG_HIDDEN); else lv_obj_remove_flag(g_menu_btn, LV_OBJ_FLAG_HIDDEN); }
+        track_state_t cs; ipc_get_state(&cs); mdb_song_t ms; g_cur_id = (cs.have_track && mdb_song_by_path(cs.path, &ms)) ? ms.id : -1;
+    }
     if(g_title_lbl) lv_label_set_text(g_title_lbl, g_name);
     if(!g_song_list) return;
+    vlist_end(&g_plv);
     lv_obj_clean(g_song_list);
+    free(g_pl_songs); g_pl_songs = NULL; g_pl_n = 0;
     /* size to the real song count (no 300 cap). songs[] is only read while building the rows
      * (plv_song_cb replays by id+position, not a retained pointer) -> malloc + free here. */
     int cnt = mdb_playlist_count(g_pid);
@@ -80,30 +132,10 @@ static void plv_reload(void){
         lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
         return;
     }
-    for(int i=0;i<n;i++){
-        lv_obj_t *r = lv_button_create(g_song_list);
-        lv_obj_remove_style_all(r);
-        lv_obj_set_size(r, 280, 46);
-        lv_obj_set_style_radius(r, 8, 0);
-        lv_obj_set_style_bg_color(r, lv_color_hex(0x1C1C1E), LV_STATE_PRESSED);
-        lv_obj_set_style_bg_opa(r, LV_OPA_70, LV_STATE_PRESSED);
-        lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_event_cb(r, plv_song_cb, LV_EVENT_SHORT_CLICKED, (void*)(intptr_t)(i+1));
-        lv_obj_add_event_cb(r, plv_remove_cb, LV_EVENT_LONG_PRESSED, (void*)(intptr_t)(i+1));  /* L32: hold to remove */
-        lv_obj_t *t = lv_label_create(r);
-        lv_label_set_text(t, songs[i].title);
-        lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(t, 12, 5); lv_obj_set_size(t, 256, 19);
-        lv_obj_set_style_text_font(t, ui_font_cjk(16), 0);   /* CJK titles like Library/Search */
-        lv_obj_set_style_text_color(t, lv_color_hex(0xFFFFFF), 0);
-        lv_obj_t *a = lv_label_create(r);
-        lv_label_set_text(a, songs[i].artist);
-        lv_label_set_long_mode(a, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(a, 12, 25); lv_obj_set_size(a, 256, 16);
-        lv_obj_set_style_text_font(a, ui_font_cjk(14), 0);
-        lv_obj_set_style_text_color(a, lv_color_hex(0xC7C7CC), 0);
-    }
-    free(songs);
+    g_pl_songs = songs; g_pl_n = n;                  /* kept: rows are created as they scroll into view */
+    lv_obj_scroll_to_y(g_song_list, 0, LV_ANIM_OFF);
+    if(n >= VLIST_MIN) vlist_begin(&g_plv, g_song_list, n, 46, 6, 0, 226, plv_add_row);
+    else for(int i = 0; i < n; i++) plv_add_row(i);
     { static int hinted = 0; if(!hinted){ hinted = 1; ui_toast("Hold a song to remove it"); } }  /* L32 discoverability, once/run */
 }
 /* Public: rebuild the list from the DB. Called by the screen manager on EVERY entry
@@ -261,7 +293,7 @@ static void open_menu_cb(lv_event_t *e){
     lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
     lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
     card_btn(c, 12,  216, "Edit Name",       lv_color_hex(0x2C2C2E), lv_color_hex(0xFFFFFF), rename_cb);
-    card_btn(c, 64,  216, "Export to SD",    lv_color_hex(0x2C2C2E), lv_color_hex(0x0A84FF), export_cb);
+    card_btn(c, 64,  216, "Export to SD",    lv_color_hex(0x2C2C2E), lv_color_hex(UI_RED), export_cb);
     card_btn(c, 116, 216, "Delete Playlist", lv_color_hex(0x2C2C2E), lv_color_hex(0xFF453A), del_menu_cb);
 }
 
@@ -300,6 +332,9 @@ void plview_create(lv_obj_t *root){
     /* "more/options" (edit/rename/delete). Drawn "•••" - Apple-Music-style More - because the
      * bullet glyph isn't in this tree's montserrat; LV_SYMBOL_LIST misread as a track list. */
     lv_obj_t *menu_btn = icon_btn(root, 266, 68, 36, "", lv_color_hex(0xC7C7CC), open_menu_cb);
+    g_menu_btn = menu_btn;
+    g_clear_btn = icon_btn(root, 246, 68, 56, "Clear", lv_color_hex(0xFFFFFF), clear_cb);   /* the Queue only */
+    lv_obj_add_flag(g_clear_btn, LV_OBJ_FLAG_HIDDEN);
     for(int i=0;i<3;i++){
         lv_obj_t *d = lv_obj_create(menu_btn);
         lv_obj_remove_style_all(d);
@@ -323,6 +358,7 @@ void plview_create(lv_obj_t *root){
     lv_obj_set_scroll_dir(g_song_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(g_song_list, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(g_song_list, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    lv_obj_add_event_cb(g_song_list, plv_scroll_cb, LV_EVENT_SCROLL, NULL);
 }
 
 lv_obj_t *playlistview_scroller(void){ return g_song_list; }

@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include <string.h>
+#include "orbit.h"
+#include "theme.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -8,48 +11,48 @@
  * the captured V2.28 switch sequence via ui_set_source_mode() and marks it selected.
  * 0=Local 1=USB-DAC 2=BT-Receiving 3=USB-Storage. */
 
-typedef struct { const char *name, *sub; } modeinfo_t;
+typedef struct { const char *l1, *l2, *glyph; int mode; } modeinfo_t;
+/* 2x3 grid. `mode` is the index ui_set_source_mode() takes; grid order is presentation only.
+ * Row 1: Local / USB DAC / BT DAC   Row 2: BT streaming / AirPlay / USB storage
+ * BT streaming (4) and AirPlay (5) use the V2.40-verified 0657 values 07 and 0A. */
 static const modeinfo_t MODES[] = {
-    { "Local Playback",      "Play from the microSD card" },
-    { "USB DAC",             "Be a USB sound card for a PC" },
-    { "Bluetooth Receiving", "Play audio sent from a phone" },
-    { "USB Storage",         "Open the card on a computer" },
+    { "Local",   "playback",  LV_SYMBOL_SD_CARD,    0 },
+    { "USB",     "DAC",       LV_SYMBOL_USB,        1 },
+    { "BT",      "DAC",       LV_SYMBOL_BLUETOOTH,  2 },
+    { "BT",      "streaming", LV_SYMBOL_VOLUME_MAX, 4 },
+    { "AirPlay", "",          LV_SYMBOL_WIFI,       5 },
+    { "USB",     "storage",   LV_SYMBOL_DRIVE,      3 },
 };
 #define N_MODES ((int)(sizeof(MODES)/sizeof(MODES[0])))
 
-static lv_obj_t *g_check[N_MODES];   /* per-row checkmark label */
-static lv_obj_t *g_row[N_MODES];     /* per-row button (for the selected highlight) */
+static orbit_t g_orb;                /* six modes orbiting a hub; the hub's ring shows the state */
+static int slot_of_mode(int m){ for(int i=0;i<N_MODES;i++) if(MODES[i].mode == m) return i; return -1; }
 
-static void mark_selected_mode(int cur){
-    for(int i=0;i<N_MODES;i++){
-        if(g_check[i]){ lv_label_set_text(g_check[i], i==cur ? LV_SYMBOL_OK : "");
-                        lv_obj_set_style_text_color(g_check[i], ui_current_accent(), 0); }  /* track accent changes */
-        if(g_row[i]){   /* selected row gets an accent ring + slightly lifted fill */
-            lv_obj_set_style_border_width(g_row[i], i==cur ? 2 : 0, 0);
-            lv_obj_set_style_border_color(g_row[i], ui_current_accent(), 0);
-            lv_obj_set_style_bg_color(g_row[i], lv_color_hex(i==cur ? 0x242426 : 0x1C1C1E), 0);
-        }
+static void paint(int slot, const char *glyph){   /* slot = orbit index, or -1 for none */
+    int pending = (glyph && !strcmp(glyph, LV_SYMBOL_REFRESH));
+    lv_color_t acc = lv_color_hex(TH_ACCENT);
+    if(pending){                                  /* the tapped mode gets a ring; the hub's ring spins */
+        orbit_set_pending(&g_orb, slot, acc);
+        orbit_hub_set(&g_orb, LV_SYMBOL_REFRESH, acc, "Switching...");   /* ASCII: the caption font has no ellipsis */
+        orbit_hub_ring(&g_orb, ORBIT_RING_SPIN, acc, 0);
+        return;
     }
+    orbit_set_pending(&g_orb, -1, acc);
+    for(int i = 0; i < N_MODES; i++) orbit_set_on(&g_orb, i, i == slot, acc);   /* the active mode: filled */
+    if(slot >= 0){ orbit_hub_set(&g_orb, MODES[slot].glyph, acc, "Back"); orbit_hub_ring(&g_orb, ORBIT_RING_FULL, acc, 0); }
+    else { orbit_hub_set(&g_orb, LV_SYMBOL_SD_CARD, lv_color_hex(TH_TXT1), "Back"); orbit_hub_ring(&g_orb, ORBIT_RING_GREY, acc, 0); }
 }
+static void mark_selected_mode(int cur){ paint(slot_of_mode(cur), LV_SYMBOL_OK); }
 static void mark_selected(void){ mark_selected_mode(ui_get_source_mode()); }
 
 
+static void hub_back_cb(lv_event_t *e){ (void)e; screen_back(); }
 static uint32_t g_last_switch = 0;   /* debounce: a switch takes a few seconds to apply in the player */
 
 /* Pending state: the tapped row shows a "switching" glyph (not the confirmed checkmark) while the
  * gadget switch is in flight - there is no source-mode completion readback, so after the switch
  * window we settle to the selection best-effort (matches the honest "Switching..." toast). */
-static void mark_pending(int m){
-    for(int i=0;i<N_MODES;i++){
-        if(g_check[i]){ lv_label_set_text(g_check[i], i==m ? LV_SYMBOL_REFRESH : "");
-                        lv_obj_set_style_text_color(g_check[i], ui_current_accent(), 0); }
-        if(g_row[i]){   /* highlight the row being switched to */
-            lv_obj_set_style_border_width(g_row[i], i==m ? 2 : 0, 0);
-            lv_obj_set_style_border_color(g_row[i], ui_current_accent(), 0);
-            lv_obj_set_style_bg_color(g_row[i], lv_color_hex(i==m ? 0x242426 : 0x1C1C1E), 0);
-        }
-    }
-}
+static void mark_pending(int m){ paint(slot_of_mode(m), LV_SYMBOL_REFRESH); }
 
 static lv_timer_t *g_settle = NULL;
 static int g_pending_mode = -1;   /* the mode a switch is settling to (so reopening the screen keeps showing "switching") */
@@ -72,9 +75,9 @@ static void settle_cb(lv_timer_t *t){
     mark_selected_mode(show);
 }
 
-static void row_cb(lv_event_t *e){
-    if(lv_event_get_code(e)!=LV_EVENT_CLICKED) return;
-    int m = (int)(uintptr_t)lv_event_get_user_data(e);
+static void row_cb(int slot){                 /* a tap inside a slice (the wheel does the hit-testing) */
+    if(slot < 0 || slot >= N_MODES) return;
+    int m = MODES[slot].mode;
     /* Serialise: ignore taps while the previous switch is still applying (the player's gadget
      * state-machine is asynchronous). NB we do NOT early-return on "same mode" - re-issuing must
      * always be allowed so Local works as a recover even if our cached mode is stale. */
@@ -86,9 +89,10 @@ static void row_cb(lv_event_t *e){
         if(g_settle) lv_timer_del(g_settle);
         g_settle = lv_timer_create(settle_cb, 3200, NULL);   /* settle to the checkmark after the switch window */
         /* honest wording: the frames are queued; the async switch completes a moment later. */
-        static const char *msg[N_MODES] = {
+        static const char *msg[] = {
             "Switching to local playback", "Switching to USB DAC",
-            "Switching to Bluetooth receiving", "Switching to USB storage" };
+            "Switching to Bluetooth receiving", "Switching to USB storage",
+            "Bluetooth streaming on", "AirPlay on \xE2\x80\x93 pick the Disc on your device" };
         ui_toast(msg[m]);
     } else {
         ui_toast("Couldn't switch mode");
@@ -106,49 +110,17 @@ void modes_create(lv_obj_t *root){
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
 
     /* back button (kept out of the clipped top-left corner) */
-    ui_header(root, "Working Mode");   /* shared standard header */
+    /* no header: the wheel fills the panel and its hub is the way back */
 
-    /* vertical list of mode rows */
-    lv_obj_t *col = lv_obj_create(root);
-    lv_obj_remove_style_all(col);
-    lv_obj_set_size(col, 300, 250); lv_obj_set_pos(col, 30, 76);
-    lv_obj_set_style_pad_bottom(col, 44, 0);   /* last mode row scrolls clear of the round bezel */
-    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(col, 8, 0);
-    lv_obj_set_scroll_dir(col, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(col, LV_SCROLLBAR_MODE_OFF);
-
-    for(int i=0;i<N_MODES;i++){
-        lv_obj_t *row = lv_button_create(col);
-        g_row[i] = row;
-        lv_obj_remove_style_all(row);
-        lv_obj_set_size(row, 276, 54);
-        lv_obj_set_style_radius(row, 14, 0);
-        lv_obj_set_style_bg_color(row, lv_color_hex(0x1C1C1E), 0);
-        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(row, lv_color_hex(0x2C2C2E), LV_STATE_PRESSED);
-        lv_obj_add_event_cb(row, row_cb, LV_EVENT_CLICKED, (void*)(uintptr_t)i);
-
-        lv_obj_t *nm = lv_label_create(row);
-        lv_label_set_text(nm, MODES[i].name);
-        lv_obj_set_pos(nm, 16, 9);
-        lv_obj_set_style_text_font(nm, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(nm, lv_color_hex(0xFFFFFF), 0);
-
-        lv_obj_t *sb = lv_label_create(row);
-        lv_label_set_text(sb, MODES[i].sub);
-        lv_obj_set_pos(sb, 16, 30);
-        lv_obj_set_width(sb, 210);                       /* keep clear of the right-side checkmark */
-        lv_label_set_long_mode(sb, LV_LABEL_LONG_DOT);
-        lv_obj_set_style_text_font(sb, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(sb, lv_color_hex(0x8E8E93), 0);
-
-        g_check[i] = lv_label_create(row);
-        lv_label_set_text(g_check[i], "");
-        lv_obj_align(g_check[i], LV_ALIGN_RIGHT_MID, -14, 0);
-        lv_obj_set_style_text_color(g_check[i], ui_current_accent(), 0);
-        lv_obj_set_style_text_font(g_check[i], &lv_font_montserrat_18, 0);
+    /* orbit: six modes, clockwise from the upper right; the top stays open for the title */
+    orbit_title(root, "Working mode");
+    static char caps[N_MODES][32];
+    orbit_item_t it[N_MODES];
+    for(int i = 0; i < N_MODES; i++){
+        snprintf(caps[i], sizeof caps[i], "%s%s%s", MODES[i].l1, MODES[i].l2[0] ? " " : "", MODES[i].l2);
+        it[i].glyph = MODES[i].glyph; it[i].cap = caps[i];
     }
+    orbit_create(&g_orb, root, it, N_MODES, -60, row_cb);
+    orbit_hub_create(&g_orb, root, hub_back_cb, LV_SYMBOL_SD_CARD, "Back");
     mark_selected();
 }

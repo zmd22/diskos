@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <spawn.h>
 #include <unistd.h>
 #include <time.h>
 #include <math.h>
@@ -13,6 +14,7 @@
 #include <ucontext.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <limits.h>
 #include <sys/mman.h>   /* mmap /dev/mem: read the Vol-Up GPIO pin level directly at boot */
 #include <stdint.h>
 #include <sys/socket.h>
@@ -24,6 +26,7 @@
 #include "lvgl/lvgl.h"
 #include "fb_pan.h"
 #include "screens.h"
+#include "theme.h"
 #include "anim.h"
 #include "ipc.h"
 #include "fwcaps.h"
@@ -169,6 +172,8 @@ static void status_poll_cb(lv_timer_t *t){
     bt = bt_radio_on();
 
     home_set_status(batt, charging, wifi, bt);
+    usage_note_battery(batt, charging);
+    quicksettings_set_battery(batt, charging);
 }
 void ui_status_refresh(void){ status_poll_cb(NULL); }
 
@@ -178,6 +183,66 @@ void ui_status_refresh(void){ status_poll_cb(NULL); }
  * write it BACK periodically so the RTC stays current (ntpd corrects the system
  * clock when WiFi is up, and that corrected time then gets saved to the RTC). */
 static int run_bounded(char *const argv[], int timeout_ms);   /* defined below (killable child + hard timeout) */
+
+/* ---- auto power-off on idle ----------------------------------------------------------------------------
+ * Settings -> System -> Auto Power-Off (Off / 10 / 20 / 30 / 60 min). The idle clock runs only while
+ * nothing plays, nobody touches the player, it's in Local mode, the card isn't handed to a PC, no library
+ * scan runs and the keyboard isn't open. With the screen lit (or dimmed), the last 30 s show a countdown
+ * that any tap cancels; with the screen fully off nobody is looking, so it simply powers off. The shutdown
+ * is a plain `sync; poweroff`, verified on the device to cut power cleanly. */
+static lv_obj_t *g_ao_ov, *g_ao_lbl;
+static volatile int g_ao_cancel;
+static void ao_tap_cb(lv_event_t *e){ (void)e; g_ao_cancel = 1; }
+static void ao_show(int secs){
+    if(!g_ao_ov){
+        g_ao_ov = lv_obj_create(lv_layer_top());
+        lv_obj_remove_style_all(g_ao_ov);
+        lv_obj_set_size(g_ao_ov, 360, 360);
+        lv_obj_set_style_bg_color(g_ao_ov, lv_color_hex(TH_BG), 0);
+        lv_obj_set_style_bg_opa(g_ao_ov, 200, 0);
+        lv_obj_add_flag(g_ao_ov, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(g_ao_ov, ao_tap_cb, LV_EVENT_PRESSED, NULL);
+        lv_obj_t *ic = lv_label_create(g_ao_ov);
+        lv_label_set_text(ic, LV_SYMBOL_POWER);
+        lv_obj_set_style_text_font(ic, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(ic, lv_color_hex(TH_ACCENT), 0);
+        lv_obj_align(ic, LV_ALIGN_CENTER, 0, -46);
+        g_ao_lbl = lv_label_create(g_ao_ov);
+        lv_obj_set_style_text_font(g_ao_lbl, TH_F_TITLE, 0);
+        lv_obj_set_style_text_color(g_ao_lbl, lv_color_hex(TH_TXT1), 0);
+        lv_obj_align(g_ao_lbl, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_t *h = lv_label_create(g_ao_ov);
+        lv_label_set_text(h, "Tap to stay on");
+        lv_obj_set_style_text_font(h, TH_F_DETAIL, 0);
+        lv_obj_set_style_text_color(h, lv_color_hex(TH_TXT2), 0);
+        lv_obj_align(h, LV_ALIGN_CENTER, 0, 34);
+    }
+    char b[48]; snprintf(b, sizeof b, "Powering off in %d s", secs < 0 ? 0 : secs);
+    if(strcmp(lv_label_get_text(g_ao_lbl), b)) lv_label_set_text(g_ao_lbl, b);
+    lv_obj_remove_flag(g_ao_ov, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(g_ao_ov);
+}
+static void ao_hide(void){ if(g_ao_ov) lv_obj_add_flag(g_ao_ov, LV_OBJ_FLAG_HIDDEN); }
+/* the decision, kept pure so it can be tested: what to do after `idle` ms with a `mins` setting */
+enum { AO_NONE, AO_COUNT, AO_OFF };
+static int ao_decide(int mins, uint32_t idle, int screen_off, int *secs){
+    uint32_t limit = (uint32_t)mins * 60000u;
+    if(mins <= 0 || idle + 30000u < limit) return AO_NONE;
+    if(idle >= limit) return AO_OFF;
+    if(screen_off) return AO_NONE;                         /* nobody is looking: no countdown, off at the limit */
+    *secs = (int)((limit - idle + 999) / 1000);
+    return AO_COUNT;
+}
+static uint32_t g_ao_fired;                 /* when poweroff was launched (0 = not yet) */
+static void ao_power_off(void){
+    if(g_ao_fired && lv_tick_elaps(g_ao_fired) < 60000) return;   /* launched already: never spawn it twice */
+    g_ao_fired = lv_tick_get(); if(!g_ao_fired) g_ao_fired = 1;
+    fprintf(stderr, "auto power-off: idle timeout reached - sync + poweroff\n"); fflush(stderr);
+    usage_save();                          /* keep the usage history up to this minute */
+    sync();
+    char *a[] = { "sh", "-c", "sync; poweroff", NULL };
+    run_bounded(a, 10000);
+}
 /* Bounded so a busy I2C/RTC can't freeze the LVGL thread while the screen is idle: a blocking
  * system("hwclock -w") on the main thread was a credible alive-but-hung idle path. */
 static void hwclock_save_tick(lv_timer_t *t){ (void)t; char *a[] = { "hwclock", "-w", NULL }; run_bounded(a, 3000); }
@@ -410,7 +475,7 @@ static pthread_mutex_t g_sd_mode_mu = PTHREAD_MUTEX_INITIALIZER;
  * reachable from here. (Art-cache writes to the SD are lazy/paused; a future belt-and-braces step is
  * to quiesce them explicitly before Storage - tracked separately.) */
 int ui_set_source_mode(int mode){
-    if(mode < 0 || mode > 3) return -1;                  /* validate BEFORE touching the audio path */
+    if(mode < 0 || mode > 5) return -1;                  /* validate BEFORE touching the audio path */
     int was_playing = g_playing;
     if(was_playing && ipc_send_cmd("0201000C0000") < 0) return -1;   /* pause; abort if it won't queue */
     /* Take the SD-mode lock for the whole publish+export sequence so the coldplug worker cannot emit
@@ -455,6 +520,11 @@ int ui_set_source_mode(int mode){
         case 1: SND("0642000C0002"); SND("0657000C0008"); break;                     /* USB-DAC -> uac2 */
         case 2: SND("0818000C0000"); SND("0642000C0000"); SND("0657000C0006"); break;/* BT sink */
         case 3: SND("0642000C0001"); SND("0657000C0008"); break;                     /* Storage -> mass_storage */
+        /* V2.40-verified 0657 values (checked on hardware: WORK_MODE 5 + a listener on port 5000 for
+         * AirPlay). NB 0657000C0008 is plain LOCAL playback - the docs' "mode 8 = network receiver"
+         * is wrong, which is why AirPlay could never be triggered before. */
+        case 4: SND("0642000C0000"); SND("0657000C0007"); break;                     /* BT streaming */
+        case 5: SND("0642000C0000"); SND("0657000C000A"); break;                     /* AirPlay receiver */
     }
     #undef SND
     if(rc < 0){
@@ -599,6 +669,7 @@ static void migrate_books_retry_cb(lv_timer_t *t){
 }
 static void scanner_poll(lv_timer_t *t){
     (void)t;
+    ui_scan_orbit(scanner_active());   /* the dot orbits the rim while a scan runs */
     if(scanner_take_finished()){
         mdb_load();               /* reload the in-memory library (also invalidates the group caches) */
         library_ensure_capacity(); /* grow row buffers if a clean first-boot 1-song alloc just gained thousands */
@@ -613,7 +684,8 @@ static void scanner_poll(lv_timer_t *t){
         else if(scanner_no_sd())  snprintf(b, sizeof b, "Insert an SD card to scan");    /* SD not mounted; library kept */
         else if(total>0 && unsup>0)
                              snprintf(b, sizeof b, "Scanned %d song%s (%d unsupported)", total, total==1?"":"s", unsup);
-        else if(total>0)     snprintf(b, sizeof b, "Scanned %d song%s", total, total==1?"":"s");
+        else if(total>0){    snprintf(b, sizeof b, "Updated \xC2\xB7 %d song%s", total, total==1?"":"s");
+                             ui_toast_icon(LV_SYMBOL_OK, lv_color_hex(0x34C759), b); return; }   /* success: a green tick */
         else if(done>0)      snprintf(b, sizeof b, "Scan failed - library kept");   /* rolled back */
         else if(unsup>0)     snprintf(b, sizeof b, "No music found (%d file%s not MP3/FLAC/WAV)", unsup, unsup==1?"":"s");
         else                 snprintf(b, sizeof b, "No music found");
@@ -649,7 +721,27 @@ int ui_set_volume(int vol){
 void ui_disarm_book_eoc(void);   /* fwd: defined with the sleep statics below (also in screens.h) */
 static int g_book_single_mode = 0;  /* 1 while a book has forced Single play-mode; the next music play restores the user's configured mode */
 static uint32_t g_book_noadopt_until = 0;  /* after an explicit play, don't let book_tick adopt the (possibly still-reported) old book during the transition */
+static long g_active_pid;                   /* the custom playlist being played (0 = a library list) */
+static void ui_play_list_internal_book(void);
+/* What the user was playing before any queued songs took over, so the queue can hand back to it:
+ * a library list (type + name), a custom playlist (type 5 + pid), or -1 = neither (a book / single song). */
+static int  g_ctx_type = -1;
+static char g_ctx_name[256];
+static long g_ctx_pid;
+static int  g_q_internal;                   /* set while the queue itself starts playback (not a user choice) */
+int ui_play_context(int *type, char *name, int cap, long *pid){
+    if(type) *type = g_ctx_type;
+    if(name && cap > 0) snprintf(name, (size_t)cap, "%s", g_ctx_name);
+    if(pid) *pid = g_ctx_pid;
+    return g_ctx_type;
+}
 void ui_play_list(int list_type, const char *name, int pos1){
+    if(!g_q_internal){                      /* the user started something: remember it, tell the queue */
+        if(list_type != 5){ g_ctx_type = list_type; snprintf(g_ctx_name, sizeof g_ctx_name, "%s", name ? name : ""); g_ctx_pid = 0; }
+        else { g_ctx_type = -1; g_ctx_name[0] = 0; g_ctx_pid = 0; }
+        queue_note_external_play();
+    }
+    if(list_type != 5) g_active_pid = 0;   /* a library list: not a custom playlist any more */
     /* A music list play (not a custom playlist, type 5) makes the stock player build its queue from the
      * UNFILTERED SONG table. If a .m4b hasn't migrated out yet, it would leak into that queue - so ensure
      * migration first, and refuse the play (rather than queue a book) if it still can't complete. */
@@ -715,6 +807,28 @@ void ui_play_list(int list_type, const char *name, int pos1){
     fflush(stderr);
 }
 /* Play a custom playlist (list_type 5) by its id, from 1-based track pos. */
+long ui_playing_playlist(void){ return g_active_pid; }
+static void ui_play_list_internal_book(void){       /* a book start: the user's choice, but not a list to return to */
+    g_ctx_type = -1; g_ctx_name[0] = 0; g_ctx_pid = 0; queue_note_external_play();
+    int was = g_q_internal; g_q_internal = 1; ui_play_list(5, "", 1); g_q_internal = was;
+}
+/* the queue's own plays: the playback slot (already filled by the queue) at pos, in order (Sequential) */
+void ui_play_slot(int pos){
+    int was = g_q_internal; g_q_internal = 1;
+    ipc_send_cmd("0102000C0000");                   /* Sequential while queued songs play */
+    ui_invalidate_play_scope(); g_active_pid = 0;
+    ui_play_list(5, "", pos);
+    g_q_internal = was;
+}
+/* hand back to what was playing before the queue, at pos (1-based) in it, in the user's own play mode */
+void ui_play_restore(int type, const char *name, long pid, int pos){
+    int was = g_q_internal; g_q_internal = 1;
+    char m2[16]; snprintf(m2, sizeof m2, "0102000C%04X", cfg_get_int("work_mode", 0) & 0xFFFF);
+    if(type == 5 && pid > 0) ui_play_playlist(pid, pos);          /* sends the play mode itself */
+    else if(type >= 0 && type != 5){ ipc_send_cmd(m2); ui_invalidate_play_scope(); ui_play_list(type, name, pos); }
+    else ipc_send_cmd(m2);                                        /* nothing to return to: just the play mode back */
+    g_q_internal = was;
+}
 void ui_play_playlist(long pid, int pos){
     /* diskOS's type-5 play always resolves to seq 0, so passing the playlist id as the name never
      * targeted that playlist (and, once the book slot exists, it played the BOOK). Instead copy the
@@ -723,13 +837,15 @@ void ui_play_playlist(long pid, int pos){
      * NOT Single. */
     int n = mdb_reserved_slot_set_playlist(pid);
     if(n <= 0){ ui_toast("Playlist is empty"); return; }
+    if(!g_q_internal){ g_ctx_type = 5; g_ctx_name[0] = 0; g_ctx_pid = pid; queue_note_external_play(); }
+    g_active_pid = pid;
     g_book_single_mode = 0;                                 /* not a book */
     { char m[16]; snprintf(m, sizeof m, "0102000C%04X", cfg_get_int("work_mode", 0) & 0xFFFF); ipc_send_cmd(m); }  /* set the music play-mode explicitly - a song-row tap in a playlist does not, and a prior book left Single */
     if(ui_get_source_mode() == 0 && !g_route_mac[0]) ipc_send_cmd("0657000C0008");  /* local work-mode: a type-5 play from an idle player needs it (same as a book) */
     if(pos < 1) pos = 1;
     g_play_target[0] = 0;                                   /* a playlist has no single-track target to prove */
     ui_invalidate_play_scope();
-    ui_play_list(5, "", pos);                               /* seq 0 = reserved slot, now the playlist */
+    { int was = g_q_internal; g_q_internal = 1; ui_play_list(5, "", pos); g_q_internal = was; }   /* context recorded above */                               /* seq 0 = reserved slot, now the playlist */
 }
 /* Favourite/unfavourite the CURRENT song (0104: 1=love -> MY_LOVE, 0=unlove). */
 void ui_set_favorite(int on){ g_play_scope[0] = '\0'; g_play_pendscope[0] = '\0'; ipc_send_cmd(on ? "0104000C0001" : "0104000C0000"); }
@@ -863,6 +979,7 @@ void ui_play_book(const char *path, long resume_ms){
      * member with no SONG row still decodes, and Single play-mode stops cleanly at the book's end without
      * rolling into the stale alternate buffer. Set the slot to this book, force Single mode (transient -
      * the next music play restores the user's mode via play_list_mode), then play seq 0. */
+    g_active_pid = 0;                                        /* the slot now holds a book, not the queue */
     if(!mdb_reserved_slot_set(path)){ ui_toast("Couldn't start book"); return; }
     /* A type-5 play from an idle player can leave the work-mode NULL (player logs NO_WORK_MODE and never
      * starts). Re-assert the local-play route + work-mode first - device-verified this is what a book
@@ -877,7 +994,7 @@ void ui_play_book(const char *path, long resume_ms){
     g_book_single_mode = 1;                                 /* remember to restore the music mode on the next music play */
     snprintf(g_play_target, sizeof g_play_target, "%s", path);   /* confirm THIS file loads before caching the scope */
     ui_invalidate_play_scope();                             /* force a fresh type-5 rebuild against the just-rewritten slot */
-    ui_play_list(5, "", 1);                                 /* frame 0100001000000005 -> reserved slot (seq 0): an isolated 1-item queue */
+    ui_play_list_internal_book();                                 /* frame 0100001000000005 -> reserved slot (seq 0): an isolated 1-item queue */
     g_play_pending = 0;                                     /* a book owns its own load-confirmation via the book session (book_tick's deadline), not the music-scope 6s "Couldn't start playback" timeout - which false-fires when re-tapping the already-current book (path unchanged) */
     /* Arm the session AFTER the play call: ui_play_list clears the session, so setting it here makes
      * THIS book the active context. */
@@ -1095,17 +1212,19 @@ static void app_run(const char *exec){
         ui_toast("Can't launch app");
         return;
     }
+    /* posix_spawn, not fork+exec: fork duplicates this process, which needs as much free memory as the
+     * UI occupies and fails on a loaded player (a big queue leaves only a few MB free) - that is what
+     * produced "Launch failed" on a busy device. spawn hands straight over to the new program. */
     int failed = 0;
-    pid_t pid = fork();
-    if(pid == 0){
-        execl(exec, exec, (char*)NULL);
-        _exit(127);
-    } else if(pid > 0){
+    pid_t pid = 0;
+    char *const argv[] = { (char*)exec, NULL };
+    extern char **environ;
+    if(posix_spawn(&pid, exec, NULL, NULL, argv, environ) != 0){
+        failed = 1;                                                           /* spawn failed */
+    } else {
         int status = 0;
         if(waitpid(pid, &status, 0) < 0) failed = 1;                          /* wait failed: status undefined */
         else if(WIFEXITED(status) && WEXITSTATUS(status) == 127) failed = 1;  /* exec failed */
-    } else {
-        failed = 1;  /* fork failed */
     }
     /* reclaim the screen: invalidate everything and force an immediate redraw */
     lv_obj_invalidate(lv_screen_active());
@@ -1567,6 +1686,80 @@ static int sd_cold_mount_allowed(void){
      * if the gadget has not bound YET, so a mount can't race a queued-but-unexecuted export (M19). */
     return (up >= 0.0 && up <= 150.0 && !sd_exported_to_host() && atomic_load(&g_sd_writable));
 }
+/* ---- SD safety ----------------------------------------------------------------------------------------
+ * A card mounted with the exFAT driver's default `delayed_meta` keeps directory entries, file sizes and the
+ * allocation bitmap in RAM until an unmount or sync, and nothing on this device unmounts the card at
+ * shutdown. The flusher below syncs the card's filesystem every few seconds, so even a hard power-off loses
+ * at most that window. (Cold-boot mounting itself is handled in coldplug_thread: on V2.40 the player now
+ * mounts the card after a controller re-announce; the UI never mounts it.) */
+#include <sys/syscall.h>
+/* flush the card every few seconds: bounded loss on any shutdown, near-zero cost when nothing is dirty */
+static void *sd_flusher_thread(void *arg){
+    (void)arg;
+    for(;;){
+        sleep(4);
+        FILE *f = fopen("/proc/mounts", "r");
+        int mounted = 0;
+        if(f){ char line[512]; while(fgets(line, sizeof line, f)) if(strstr(line, " /tmp/sdcard ")){ mounted = 1; break; }
+               fclose(f); }
+        if(!mounted) continue;
+        int fd = open("/tmp/sdcard", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if(fd < 0) continue;
+#ifdef SYS_syncfs
+        if(syscall(SYS_syncfs, fd) != 0) sync();
+#else
+        sync();
+#endif
+        close(fd);
+    }
+    return NULL;
+}
+static void sd_flusher_start(void){
+    static int started = 0;
+    if(started) return;
+    started = 1;
+    pthread_t th;
+    if(pthread_create(&th, NULL, sd_flusher_thread, NULL) == 0) pthread_detach(th);
+}
+
+/* ---- cold boot on V2.40: let the PLAYER mount the card, exactly as on a real insertion -----------------
+ * A card inserted after boot is mounted by the player and is fine. A card present at boot used to get a
+ * 'add' nudge plus a direct mount by the UI - two parties handling one card - and was wiped shortly after
+ * boot. So instead of mounting it ourselves we make the kernel re-announce the card: unbind and rebind
+ * the SD controller, which produces the same remove/add events as pulling the card and pushing it back.
+ * The controller is found through the card's own sysfs path (/sys/block/mmcblk0 -> ... -> controller), so
+ * the SDIO Wi-Fi host is never touched. If the player still doesn't mount it, we leave the card alone
+ * (library empty, re-insert fixes it) rather than mount it behind the player's back. */
+#ifndef SYSFS_ROOT
+#define SYSFS_ROOT ""
+#endif
+static int sd_rebind_controller(char *who, int whocap){
+    char p[PATH_MAX], dl[PATH_MAX + 16], drv[PATH_MAX], f[PATH_MAX + 16];   /* realpath() needs PATH_MAX */
+    if(!realpath(SYSFS_ROOT "/sys/block/mmcblk0/device", p)) return -1;   /* .../<ctrl>/mmc_host/mmcN/... */
+    char *mh = strstr(p, "/mmc_host/");
+    if(!mh) return -1;
+    *mh = 0;                                                             /* p = the controller device */
+    const char *ctrl = strrchr(p, '/');
+    if(!ctrl || !ctrl[1]) return -1;
+    ctrl++;
+    snprintf(dl, sizeof dl, "%s/driver", p);
+    if(!realpath(dl, drv)) return -1;                                    /* .../drivers/<name> */
+    if(who) snprintf(who, (size_t)whocap, "%.64s via %.64s", ctrl, strrchr(drv, '/') ? strrchr(drv, '/') + 1 : drv);
+    snprintf(f, sizeof f, "%s/unbind", drv);
+    int fd = open(f, O_WRONLY | O_CLOEXEC);
+    if(fd < 0) return -1;
+    ssize_t w = write(fd, ctrl, strlen(ctrl)); close(fd);
+    if(w < 0) return -1;
+    sleep(1);
+    snprintf(f, sizeof f, "%s/bind", drv);
+    for(int t = 0; t < 5; t++){                                          /* never leave the slot unbound */
+        fd = open(f, O_WRONLY | O_CLOEXEC);
+        if(fd >= 0){ w = write(fd, ctrl, strlen(ctrl)); close(fd); if(w >= 0) return 0; }
+        sleep(1);
+    }
+    return -2;                                                           /* unbound, rebind failed */
+}
+
 static void *coldplug_thread(void *arg){
     (void)arg;
     const int v240 = (fw_os_ver() == 240);
@@ -1584,45 +1777,30 @@ static void *coldplug_thread(void *arg){
         if(coldplug_mounted()){ coldplug_log("SD mounted - done"); return NULL; }
         pthread_mutex_lock(&g_sd_mode_mu);
         if(ui_get_source_mode() == 0 && !sd_exported_to_host() && !coldplug_mounted() && atomic_load(&g_sd_writable)){
-            int fd = open("/sys/block/mmcblk0/uevent", O_WRONLY | O_CLOEXEC);
-            if(fd >= 0){ ssize_t w = write(fd, "add\n", 4); (void)w; close(fd); }   /* V2.09/V2.28 nudge */
-            if(v240){                              /* V2.40: nudge won't mount -> mount directly, ONCE */
-                /* Guard EACH mount attempt with sd_cold_mount_allowed() (absolute cold-boot window + not
-                 * exported), re-evaluated per attempt so a slow exfat mount can't let the vfat fallback
-                 * begin outside the window or after a host grabbed the card. The window keeps the safety
-                 * argument on "early boot, no storage session yet" rather than the check-then-act race
-                 * (the stock Storage transition doesn't take g_sd_mode_mu). */
-                mkdir("/tmp/sdcard", 0755);
-                /* M19: the stock player owns the USB gadget cross-process - g_sd_mode_mu cannot exclude
-                 * it, so a mount can still race an export begun in the window after sd_exported_to_host().
-                 * Re-check the REAL gadget state AFTER a successful mount: if the card became host-exported,
-                 * unmount immediately (fail-closed) rather than dual-access; the one-shot then gives up. */
-                if(sd_cold_mount_allowed() && mount("/dev/mmcblk0p1", "/tmp/sdcard", "exfat", 0, NULL) == 0){
-                    if(sd_exported_to_host()){
-                        if(umount("/tmp/sdcard") != 0 && umount2("/tmp/sdcard", MNT_DETACH) != 0)
-                            coldplug_log("WARNING: post-mount export + unmount BOTH failed (card busy) - possible transient dual-access");
-                        else
-                            coldplug_log("post-mount export detected -> unmounted, host owns card (one-shot gives up)");
-                        pthread_mutex_unlock(&g_sd_mode_mu); return NULL;    /* explicit: don't fight the host */
+            if(!v240){
+                int fd = open("/sys/block/mmcblk0/uevent", O_WRONLY | O_CLOEXEC);
+                if(fd >= 0){ ssize_t w = write(fd, "add\n", 4); (void)w; close(fd); }   /* V2.09/V2.28 nudge */
+            }
+            if(v240){                              /* V2.40: re-announce the card; the player mounts it, ONCE */
+                if(sd_cold_mount_allowed()){
+                    char who[160] = "?";
+                    pthread_mutex_unlock(&g_sd_mode_mu);               /* the rebind + wait can take a while */
+                    int rc = sd_rebind_controller(who, sizeof who);
+                    char msg[240];
+                    snprintf(msg, sizeof msg, "V2.40 SD: controller re-announce (%s) rc=%d", who, rc);
+                    coldplug_log(msg);
+                    if(rc == 0){
+                        for(int w8 = 0; w8 < 20 && !coldplug_mounted(); w8++) sleep(1);
+                        coldplug_log(coldplug_mounted() ? "V2.40 SD: mounted by the player after re-announce"
+                                                        : "V2.40 SD: player did not mount it - left alone (re-insert to mount)");
                     }
-                    coldplug_log("SD direct-mounted (V2.40 exfat)"); pthread_mutex_unlock(&g_sd_mode_mu); return NULL;
-                }
-                else if(sd_cold_mount_allowed() && mount("/dev/mmcblk0p1", "/tmp/sdcard", "vfat", 0, NULL) == 0){
-                    if(sd_exported_to_host()){
-                        if(umount("/tmp/sdcard") != 0 && umount2("/tmp/sdcard", MNT_DETACH) != 0)
-                            coldplug_log("WARNING: post-mount export + unmount BOTH failed (card busy) - possible transient dual-access");
-                        else
-                            coldplug_log("post-mount export detected -> unmounted, host owns card (one-shot gives up)");
-                        pthread_mutex_unlock(&g_sd_mode_mu); return NULL;
-                    }
-                    coldplug_log("SD direct-mounted (V2.40 vfat)"); pthread_mutex_unlock(&g_sd_mode_mu); return NULL;
+                    return NULL;                   /* one-shot either way: never mount behind the player */
                 }
                 if(!sd_cold_mount_allowed()){      /* window elapsed / card exported -> give up (one-shot) */
                     pthread_mutex_unlock(&g_sd_mode_mu);
                     coldplug_log("V2.40 SD one-shot: window elapsed or card exported (SD not mounted)");
                     return NULL;
                 }
-                { char b[96]; snprintf(b, sizeof b, "SD direct-mount failed errno=%d(%s)", errno, strerror(errno)); coldplug_log(b); }
             }
         }
         pthread_mutex_unlock(&g_sd_mode_mu);
@@ -1805,6 +1983,7 @@ int main(int argc, char **argv){
     int marker_ambiguous = (!have_marker && errno != ENOENT);   /* not a clean "absent" -> treat as present */
     if(sd_exported_to_host() || have_marker || marker_ambiguous) atomic_store(&g_sd_writable, 0);
     coldplug_start();   /* auto-mount the already-inserted microSD at boot (see coldplug_thread) */
+    sd_flusher_start(); /* keep the card's metadata on the card, whoever mounted it */
     { unsigned seed=0; FILE *r=fopen("/dev/urandom","rb"); if(r){ if(fread(&seed,1,sizeof seed,r)!=sizeof seed) seed=(unsigned)time(NULL); fclose(r);} else seed=(unsigned)time(NULL); srand(seed); }  /* seed RNG (shuffle start pos) */
     lv_init();
     /* /dev/fb0 may not be ready the instant fiio_init launches us at boot; retry. */
@@ -2019,6 +2198,7 @@ int main(int argc, char **argv){
                 last_activity = lv_tick_get();
                 if(screen_current()==SCR_SAVER) screen_back();
                 ui_show_volume(st.volume);
+            quicksettings_set_volume(st.volume);   /* keep the QS arc in step with the buttons */
             }
         }
         /* the metadata 'state' field is unreliable (reports 0 while playing); infer play/pause from
@@ -2027,6 +2207,8 @@ int main(int argc, char **argv){
          * keeps "any forward change counts"; the paused-forward-seek bound is device-tunable. */
         int playing = playstate_playing(&g_ps, st.have_track, st.position_ms, lv_tick_get(), 1600, 0);
         g_playing = playing;   /* publish for ui_route_bt/ui_route_analog (raw st.state is unreliable) */
+        tagfix_auto_tick(&st, playing);   /* Auto-tag: cheap unless a new track has just played 10 s */
+        queue_tick(&st, playing);         /* the Queue: rebuilt shortly after it changes while playing */
         st.state = playing ? 2 : 1;
         /* when the backlight is off (deep idle) nothing is visible - skip the whole
          * UI refresh; it catches up on wake (last/ last_playing stay stale). */
@@ -2059,9 +2241,11 @@ int main(int argc, char **argv){
         if(bl_state != 2 && (st.seq != last || playing != last_playing)){
             last = st.seq; last_playing = playing;
             ui_update(&st);
+            quicksettings_set_now_playing(st.have_track?st.title:NULL,
+                                          st.have_track?st.artist:NULL, g_playing);
             home_set_now_playing(st.have_track?st.title:NULL,
                                  st.have_track?st.artist:NULL,
-                                 ui_current_accent(), playing);
+                                 ui_media_accent(), playing);   /* theme: media surfaces take the album colour */
             /* The art + backdrop surfaces only change on a TRACK change (or when a decode completes -
              * re-pushed below), NOT on every position tick. Re-setting the 360px backdrop image each
              * second re-invalidated the whole screen and defeated partial rendering. Track identity is
@@ -2070,7 +2254,8 @@ int main(int argc, char **argv){
             if(strcmp(idnow, np_last_path) != 0){
                 snprintf(np_last_path, sizeof np_last_path, "%s", idnow);
                 home_set_art_src(ui_current_thumb_src());
-                home_set_backdrop(ui_current_backdrop_src());
+                home_set_backdrop(ui_current_backdrop_img());
+                quicksettings_set_art(ui_current_cover_dsc(), ui_current_backdrop_img());
                 saver_set_track(st.have_track?st.title:NULL,
                                 st.have_track?st.artist:NULL,
                                 ui_current_backdrop_src());
@@ -2085,7 +2270,8 @@ int main(int argc, char **argv){
          * off (bl_state==2): it stays set and is applied on wake, else art goes stale. */
         if(bl_state != 2 && ui_take_art_applied()){
             home_set_art_src(ui_current_thumb_src());
-            home_set_backdrop(ui_current_backdrop_src());
+            home_set_backdrop(ui_current_backdrop_img());
+            quicksettings_set_art(ui_current_cover_dsc(), ui_current_backdrop_img());
             saver_set_track(st.have_track?st.title:NULL,
                             st.have_track?st.artist:NULL,
                             ui_current_backdrop_src());
@@ -2150,7 +2336,8 @@ int main(int argc, char **argv){
                     s_press_scr=screen_current();   /* a gesture belongs to the screen it STARTED on */
                     cover_tap = 0;
                     fsart_touch = ui_np_fsart_active();   /* latch: overlay owns this whole gesture */
-                    sleep_touch = ui_np_overlay_active(); /* latch: the sleep popover owns this whole gesture */
+                    sleep_touch = ui_np_overlay_active()   /* latch: the sleep popover owns this whole gesture, */
+                               || (screen_current()==SCR_EQ && eqcustom_owns_point(p.x, p.y));   /* and so does the EQ dial */
                     if(fsart_touch || sleep_touch){
                         /* a modal overlay is up -> LVGL handles it; arm no ring seek / rim scroll here */
                     } else if(screen_current()==SCR_NOWPLAYING){
@@ -2217,6 +2404,12 @@ int main(int argc, char **argv){
                     } else if(!seek_consumed){
                     if(cur==SCR_QUICK && vert && dy<0 && ady>=g_swipe_thresh && dt<700){
                         screen_back();                       /* swipe up closes quick settings */
+                    } else if(cur!=SCR_HOME && cur!=SCR_SAVER && cur!=SCR_NOWPLAYING && sy>320 &&
+                              vert && dy<0 && ady>=g_swipe_thresh*2 && dt<700){
+                        /* swipe UP from the bottom edge = go Home. Mirrors the top-edge pull-down.
+                         * Starts below y=320 and needs twice the normal travel so it can't be confused
+                         * with a list flick; Now Playing keeps its own gestures (seek ring). */
+                        screen_show(SCR_HOME);
                     } else if(cur!=SCR_QUICK && cur!=SCR_SAVER && sy<40 &&
                               vert && dy>0 && dy>=g_swipe_thresh && dt<700){
                         screen_show(SCR_QUICK);              /* pull down from top edge */
@@ -2316,6 +2509,24 @@ int main(int argc, char **argv){
             }
         }
 
+        usage_tick(bl_state != 2, g_playing);   /* Battery & usage: one sample a minute */
+        {   /* auto power-off (see ao_* above) */
+            static const int AO_MIN[5] = { 0, 10, 20, 30, 60 };
+            static uint32_t ao_busy_at = 0;
+            int ai = cfg_get_int("autooff_idx", 0);
+            int mins = (ai > 0 && ai < 5) ? AO_MIN[ai] : 0;
+            if(!ao_busy_at) ao_busy_at = lv_tick_get();
+            if(g_ao_cancel){ g_ao_cancel = 0; last_activity = lv_tick_get(); }       /* "Tap to stay on" */
+            if(g_playing || ui_get_source_mode() != 0 || sd_exported_to_host() || scanner_active() || kbinput_active())
+                ao_busy_at = lv_tick_get();                                          /* something is going on */
+            uint32_t a1 = lv_tick_elaps(last_activity), a2 = lv_tick_elaps(ao_busy_at);
+            uint32_t idle = a1 < a2 ? a1 : a2;
+            int secs = 0, act = ao_decide(mins, idle, bl_state == 2, &secs);
+            if(act == AO_OFF){ ao_hide(); ao_power_off();
+                if(g_ao_fired && lv_tick_elaps(g_ao_fired) >= 60000){ g_ao_fired = 0; ao_busy_at = lv_tick_get(); } }  /* failed: start over */
+            else if(act == AO_COUNT) ao_show(secs);                                 /* lit or dimmed: count down */
+            else ao_hide();
+        }
         /* screensaver + backlight power saving (the screen is the biggest drain):
          * idle > saver_timeout       -> show saver, dim backlight
          * idle > saver+screenoff      -> backlight off entirely */
@@ -2399,7 +2610,16 @@ int main(int argc, char **argv){
         polls_set_paused(bl_state == 2);
         g_screen_off = (bl_state == 2);   /* publish for the slow polls (skip the hcitool spawn while off) */
         g_bl_idle = (bl_state >= 1);   /* prewarm worker reads this: only work while dimmed/off */
-        int busy = lv_anim_count_running() > 0 || prev_ts == LV_INDEV_STATE_PRESSED;
+        /* 5 ms polls only while a finger is down (drag latency). A running animation needs no extra
+         * wake-ups: lv_timer_handler()'s own 'wait' already brings us back for its next frame (<=33 ms).
+         * Counting animations here made any spinner, pulse or scrolling title wake the CPU ~200x/s. */
+        int busy = (prev_ts == LV_INDEV_STATE_PRESSED);
+        /* screen fully off: nothing may draw behind a dark panel (a spinning record or a scrolling title
+         * would otherwise still render ~5x/s). Invalidation resumes - with one full redraw - on wake. */
+        { static int draw_off = 0; lv_display_t *dd = lv_display_get_default();
+          if(bl_state == 2 && !draw_off){ lv_display_enable_invalidation(dd, false); draw_off = 1; }
+          else if(bl_state != 2 && draw_off){ lv_display_enable_invalidation(dd, true); draw_off = 0;
+                                             lv_obj_invalidate(lv_screen_active()); lv_obj_invalidate(lv_layer_top()); } }
         if(bl_state == 2){
             /* deep idle (panel off): sleep ~5x/s REGARDLESS of any running animation. Nothing is
              * visible, so a stray infinite anim (e.g. a Wi-Fi/BT scan glyph left spinning, or the

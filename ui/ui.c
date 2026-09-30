@@ -2,6 +2,7 @@
 /* Copyright (C) 2026 diskOS contributors */
 #include "ui.h"
 #include "lvgl/lvgl.h"
+#include "lvgl/src/draw/lv_image_decoder_private.h"   /* poster: decode the cover once into RAM */
 #include "art.h"
 #include "ipc.h"
 #include "musicdb.h"   /* persistent per-song accent cache */
@@ -9,6 +10,7 @@
 #include "artcache.h"   /* persistent decoded-cover cache on SD */
 #include "config.h"
 #include "screens.h"
+#include "theme.h"
 #include "anim.h"
 #include "fonts_intl.h"   /* Cyrillic/Greek/Latin-ext fallback (issue #3) */
 
@@ -35,7 +37,7 @@ LV_FONT_DECLARE(font_icons_28)
 #define HEART_OUTLINE "\xEF\x82\x8A"   /* FA f08a outline heart */
 #define MOON_ICON     "\xEF\x86\x86"   /* FA f186 moon (audiobook sleep timer) */
 #define MODE_ARROW    "\xEF\x85\xB8"   /* FA f178 long-arrow-right (sequential) */
-#define C_ACCENT     0xFF375F
+#define C_ACCENT     UI_RED
 
 #define ARC_D        332
 #define ARC_SWEEP    286
@@ -73,11 +75,37 @@ static int  g_favp_active = 0, g_favp_val = 0;
 static uint32_t g_favp_set = 0;
 static char g_favp_path[520];
 static lv_obj_t *btn_mode;
+static lv_obj_t *btn_queue, *queue_badge, *queue_badge_lbl;   /* the Queue, under the play-mode icon */
+static void np_queue_place(void);
 static lv_obj_t *mode_icon;
 static lv_obj_t *mode_one;
 static int g_np_mode = -1, g_mode_px, g_mode_py;
 static lv_obj_t *t_elapsed;
 static lv_obj_t *t_remain;
+static lv_obj_t *t_sep;
+/* ---- "Poster" Now Playing style (np_style 2) + immersive vinyl/lyrics mode ---- */
+#define SHOW(o, on) do{ if(o){ if(on) lv_obj_remove_flag((o), LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag((o), LV_OBJ_FLAG_HIDDEN); } }while(0)
+static int g_bd_ok;                                /* blurred backdrop held in RAM (below) */
+static int g_np_poster = 0;
+static int g_np_ring = 0;                         /* np_style 3: the Ring design */
+static lv_image_dsc_t g_coverdsc;                 /* defined with the vinyl decoder below */
+#ifndef CBMP
+#define CBMP 148                                  /* the vinyl decoder's cover size (same value below) */
+#endif
+static lv_font_t s_font28, s_font24, s_font20, s_font16;
+static int g_arc_rot = ARC_ROT, g_arc_sweep = ARC_SWEEP;   /* poster moves the seek ring to the bottom rim */
+static int g_arc_rev = 0;   /* 1: progress runs against LVGL's clockwise angles (bottom rim, left -> right) */
+static lv_obj_t *poster_img, *poster_dim, *poster_top, *poster_fade, *np_scrim, *btn_imm, *vol_arc;
+static lv_obj_t *imm_spin, *imm_prog, *imm_hint, *imm_lyr[3], *imm_scrim;
+static lv_obj_t *imm_deco[6];  /* groove rings + label objects: only for the 148px fallback (baked otherwise) */
+static lv_obj_t *title_sh, *artist_sh;     /* poster: text drop shadows */
+static lv_obj_t *np_dots[2];                /* page dots (hidden in Poster: they sat on the volume arc) */
+static lv_obj_t *np_mid_btn;                /* poster: tap the title -> the album, this song highlighted */
+static lv_timer_t *imm_timer;
+static int32_t imm_angle;
+static int imm_vol_last = -1;
+static lv_color_t np_acc; static int np_acc_set; static char np_acc_path[520];
+static lyr_line_t g_lyr[240]; static int g_lyr_n = -1; static char g_lyr_path[520];
 
 static lv_color_t accent;
 static char last_path[256];
@@ -169,9 +197,11 @@ static void set_label_text_changed(lv_obj_t *obj, const char *txt)
  * progress sweep (and below the top drawer zone) AND the drag follows the ring
  * rather than being a straight horizontal nav slide -- so nav swipes and the
  * top-drawer pull never move the arc. "Classify first, move the arc second." */
-#define RING_CX  180
-#define RING_CY  180
-#define RING_R   (ARC_D / 2)
+#define RING_CX  g_ring_cx
+#define RING_CY  g_ring_cy
+#define RING_R   g_ring_r
+static int g_ring_cx = 180, g_ring_cy = 180, g_ring_r = ARC_D / 2;   /* Ring style: around the cover */
+static int g_tol_grab = 34, g_tol_wander = 48;                       /* band half-widths (px) */
 
 static int seek_on_band(int x, int y, int tol){
     int dx = x - RING_CX, dy = y - RING_CY;
@@ -181,15 +211,16 @@ static int seek_on_band(int x, int y, int tol){
 }
 static double seek_rel_angle(int x, int y){
     double a = atan2((double)(y - RING_CY), (double)(x - RING_CX)) * 57.2957795;
-    double rel = a - ARC_ROT;
+    double rel = a - g_arc_rot;
     while(rel < 0) rel += 360.0;
     while(rel >= 360.0) rel -= 360.0;
     return rel;   /* degrees from the start of the sweep, clockwise */
 }
 static int32_t seek_pt_to_value(int x, int y){
     double rel = seek_rel_angle(x, y);
-    if(rel > ARC_SWEEP) rel = (rel - ARC_SWEEP < 360.0 - rel) ? ARC_SWEEP : 0.0;
-    int32_t v = (int32_t)(rel / ARC_SWEEP * 1000.0 + 0.5);
+    if(rel > g_arc_sweep) rel = (rel - g_arc_sweep < 360.0 - rel) ? g_arc_sweep : 0.0;
+    int32_t v = (int32_t)(rel / g_arc_sweep * 1000.0 + 0.5);
+    if(g_arc_rev) v = 1000 - v;                          /* bottom rim: left end = start of the track */
     if(v < 0) v = 0;
     if(v > 1000) v = 1000;
     return v;
@@ -200,8 +231,8 @@ int ui_np_seek_press(int x, int y){
     g_seek_cand = 0; g_seek_on = 0; g_scrubbing = 0;   /* also clears a stuck scrub from a missed release */
     if(y < 40) return 0;                          /* top drawer zone */
     if(g_track_dur <= 0) return 0;                /* nothing to seek */
-    if(!seek_on_band(x, y, 34)) return 0;         /* not on the ring (grab band) */
-    if(seek_rel_angle(x, y) > ARC_SWEEP) return 0;/* in the bottom gap (transport buttons), not the arc */
+    if(!seek_on_band(x, y, g_tol_grab)) return 0;  /* not on the ring (grab band) */
+    if(seek_rel_angle(x, y) > g_arc_sweep) return 0;/* in the bottom gap (transport buttons), not the arc */
     g_seek_sx = x; g_seek_sy = y; g_seek_cand = 1;
     return 1;
 }
@@ -210,7 +241,7 @@ int ui_np_seek_move(int x, int y){
     if(!g_seek_cand) return 0;
     int dx = x - g_seek_sx, dy = y - g_seek_sy;
     int adx = dx<0?-dx:dx, ady = dy<0?-dy:dy;
-    if(!seek_on_band(x, y, 48)){                   /* wandered off the ring -> a nav swipe */
+    if(!seek_on_band(x, y, g_tol_wander)){         /* wandered off the ring -> a nav swipe */
         if(g_seek_on){ g_seek_on = 0; g_scrubbing = 0; lv_arc_set_value(ring, shown_progress); }
         g_seek_cand = 0; return 0;
     }
@@ -313,6 +344,8 @@ static void transport_cb(lv_event_t *e)
         }
         ui_cancel_book_resume();   /* music: next/prev change the track -> drop any pending resume */
         ui_disarm_book_eoc();      /* explicit nav -> disarm any end-of-chapter sleep left armed after a rollover */
+        if(is_next && queue_next()) return;   /* songs queued: Next goes to the first of them (not the player's own next) */
+        if(is_prev) queue_note_prev();         /* the track change that follows is a Previous: the queue leaves it alone */
     }
     ipc_send_cmd(cmd);
 }
@@ -338,9 +371,239 @@ static void fsart_reload_img(void){
     else if(cover_valid)
         lv_image_set_src(fsart_img, cover_src);        /* last resort: the 148px cover (BMP) */
 }
+/* The poster background is decoded ONCE per track into RAM. As a file source, LVGL (image cache off)
+ * re-decoded the JPEG behind every small repaint - the once-a-second ring/time update cost ~40x the
+ * Cover style's. From RAM it is a plain blit. */
+#define PSZ 364
+static uint8_t g_posterbuf[PSZ * PSZ * 3];
+static lv_image_dsc_t g_posterdsc;
+/* Decode any image the decoders can stream (JPEG blocks, BMP rows) into an XRGB8888 buffer, once. With the
+ * image cache off, a file-sourced picture is re-read from its file under every small repaint. */
+static int img_to_xrgb(const char *src, uint8_t *dst, int maxw, int maxh, int *ow, int *oh){
+    lv_image_decoder_dsc_t d; memset(&d, 0, sizeof d);
+    if(lv_image_decoder_open(&d, src, NULL) != LV_RESULT_OK) return -1;
+    int w = d.header.w, h = d.header.h, ok = 0;
+    if(w <= 0 || h <= 0 || w > maxw || h > maxh){ lv_image_decoder_close(&d); return -1; }
+    lv_area_t full = { 0, 0, w - 1, h - 1 }, ar = { LV_COORD_MIN, LV_COORD_MIN, LV_COORD_MIN, LV_COORD_MIN };
+    for(int guard = 0; guard < 100000; guard++){
+        if(lv_image_decoder_get_area(&d, &full, &ar) != LV_RESULT_OK) break;
+        const lv_draw_buf_t *db = d.decoded;
+        if(!db || !db->data) break;
+        int bw = lv_area_get_width(&ar), bh = lv_area_get_height(&ar), cf = db->header.cf;
+        if(ar.x1 < 0 || ar.x1 + bw > w) break;
+        for(int y = 0; y < bh; y++){
+            int dy = ar.y1 + y; if(dy < 0 || dy >= h) continue;
+            const uint8_t *sp = (const uint8_t *)db->data + (size_t)y * db->header.stride;
+            uint8_t *dp = dst + ((size_t)dy * w + ar.x1) * 4;
+            for(int x = 0; x < bw; x++, dp += 4){
+                if(cf == LV_COLOR_FORMAT_RGB888){ dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; sp += 3; }
+                else if(cf == LV_COLOR_FORMAT_RGB565){ uint16_t c = (uint16_t)(sp[0] | (sp[1] << 8)); sp += 2;
+                    dp[0] = (uint8_t)((c & 0x1F) << 3); dp[1] = (uint8_t)(((c >> 5) & 0x3F) << 2); dp[2] = (uint8_t)((c >> 11) << 3); }
+                else { dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; sp += 4; }      /* XRGB/ARGB8888 */
+                dp[3] = 0xFF;
+            }
+        }
+        if(ar.y2 >= h - 1 && ar.x2 >= w - 1){ ok = 1; break; }
+    }
+    lv_image_decoder_close(&d);
+    if(!ok) return -1;
+    *ow = w; *oh = h; return 0;
+}
+#define BDW 360
+static uint8_t g_bdbuf[BDW * BDW * 4];
+static lv_image_dsc_t g_bddsc;
+static int g_bd_ok;
+static void backdrop_to_ram(void){
+    g_bd_ok = 0;
+    if(!backdrop_valid) return;
+    int w, h;
+    if(img_to_xrgb(backdrop_src, g_bdbuf, BDW, BDW, &w, &h) != 0) return;
+    memset(&g_bddsc, 0, sizeof g_bddsc);
+    g_bddsc.header.magic = LV_IMAGE_HEADER_MAGIC; g_bddsc.header.cf = LV_COLOR_FORMAT_XRGB8888;
+    g_bddsc.header.w = w; g_bddsc.header.h = h; g_bddsc.header.stride = w * 4;
+    g_bddsc.data = g_bdbuf; g_bddsc.data_size = (uint32_t)(w * h * 4);
+    g_bd_ok = 1;
+}
+const void *ui_current_backdrop_img(void){
+    if(g_bd_ok) return &g_bddsc;
+    return backdrop_valid ? (const void *)backdrop_src : NULL;
+}
+static uint8_t g_posterx[PSZ * PSZ * 4];               /* poster: cover + its static shading, XRGB8888 */
+static lv_image_dsc_t g_posterxdsc;
+static int g_poster_baked;
+static int g_poster_stale = 1;           /* cover.jpg not decoded for this track yet */
+/* Every overlay on the Poster that never moves - the 22% dim, the top whisper, the soft band behind the
+ * title and the heavy bottom fade - is drawn into the picture once per track, in the display's native
+ * pixel format. Live, those were five extra blend layers under every repaint (seek ring, times, a button
+ * press) plus an RGB888->XRGB conversion; baked, a repaint is one straight copy. */
+static float grad_a(float y, float y0, float h, float a_top, float a_bot, float stop0, float stop1){
+    float t = (y - y0) / h; if(t < 0 || t > 1) return 0;
+    float s0 = stop0 / 255.0f, s1 = stop1 / 255.0f;
+    float k = t <= s0 ? 0 : t >= s1 ? 1 : (t - s0) / (s1 - s0);
+    return (a_top + (a_bot - a_top) * k) / 255.0f;
+}
+static void poster_bake(int w, int h){
+    g_poster_baked = 0;
+    if(w <= 0 || h <= 0) return;
+    int ox = (w - 360) / 2, oy = (h - 360) / 2;             /* the image is centred on the 360 panel */
+    for(int y = 0; y < h; y++){
+        float sy = (float)(y - oy);                         /* screen row */
+        float keep = 1.0f - 56 / 255.0f;                    /* poster_dim */
+        keep *= 1.0f - grad_a(sy, 0, 90, 130, 0, 0, 255);                            /* poster_top */
+        if(sy < 203) keep *= 1.0f - grad_a(sy, 128, 75, 0, 105, 0, 255);            /* band, upper (seam row belongs to the lower half) */
+        keep *= 1.0f - grad_a(sy, 203, 75, 105, 0, 0, 255);                          /* band, lower */
+        keep *= 1.0f - (sy >= 200 ? grad_a(sy, 200, 160, 0, 245, 0, 150) : 0);       /* bottom fade */
+        if(sy > 200 + 160 * 150 / 255.0f) keep = (1.0f - 56 / 255.0f) * (1.0f - 245 / 255.0f);
+        int m = (int)(keep * 256 + 0.5f);
+        const uint8_t *src = g_posterbuf + (size_t)y * w * 3; uint8_t *dst = g_posterx + (size_t)y * w * 4;
+        for(int x = 0; x < w; x++){ dst[0] = (uint8_t)((src[0] * m) >> 8); dst[1] = (uint8_t)((src[1] * m) >> 8);
+                                    dst[2] = (uint8_t)((src[2] * m) >> 8); dst[3] = 0xFF; src += 3; dst += 4; }
+    }
+    (void)ox;
+    memset(&g_posterxdsc, 0, sizeof g_posterxdsc);
+    g_posterxdsc.header.magic = LV_IMAGE_HEADER_MAGIC; g_posterxdsc.header.cf = LV_COLOR_FORMAT_XRGB8888;
+    g_posterxdsc.header.w = w; g_posterxdsc.header.h = h; g_posterxdsc.header.stride = w * 4;
+    g_posterxdsc.data = g_posterx; g_posterxdsc.data_size = (uint32_t)(w * h * 4);
+    g_poster_baked = 1;
+}
+static void poster_shading_live(int on){                    /* the live layers, only when nothing is baked */
+    SHOW(poster_dim, on); SHOW(poster_top, on); SHOW(poster_fade, on); SHOW(np_scrim, on);
+}
+static uint8_t g_spinbuf[PSZ * PSZ * 4];               /* immersive: the same cover as XRGB8888 */
+static lv_image_dsc_t g_spindsc;
+static int g_spin_ok;
+static void spin_from_poster(void){                       /* RGB888 -> the display's native XRGB8888, once */
+    g_spin_ok = 0;
+    int w = g_posterdsc.header.w, h = g_posterdsc.header.h;
+    if(!g_posterdsc.data || w <= 0 || h <= 0) return;
+    const uint8_t *s = g_posterbuf; uint8_t *d = g_spinbuf;
+    for(int i = 0; i < w * h; i++){ d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 0xFF; s += 3; d += 4; }
+    memset(&g_spindsc, 0, sizeof g_spindsc);
+    g_spindsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    g_spindsc.header.cf = LV_COLOR_FORMAT_XRGB8888;
+    g_spindsc.header.w = w; g_spindsc.header.h = h; g_spindsc.header.stride = w * 4;
+    g_spindsc.data = g_spinbuf; g_spindsc.data_size = (uint32_t)(w * h * 4);
+    /* Bake the record's grooves and centre label into the picture. They are perfectly round, so they look
+     * the same spinning; drawn as live objects they cost ~30% of every frame (anti-aliased full-size circle
+     * masks), baked they cost nothing per frame. */
+    static const float groove[4] = { 170.f, 148.f, 126.f, 104.f };
+    const float cx = w / 2.0f - 0.5f, cy = h / 2.0f - 0.5f;
+    for(int y = 0; y < h; y++){
+        float dy = y - cy;
+        for(int x = 0; x < w; x++){
+            float dx = x - cx, r = sqrtf(dx * dx + dy * dy);
+            uint8_t *p = g_spinbuf + ((size_t)y * w + x) * 4;
+            if(r < 4.0f){ p[0] = 0x2E; p[1] = 0x2A; p[2] = 0x2A; continue; }            /* spindle hole */
+            if(r < 27.0f){ float k = r > 26.0f ? (27.0f - r) : 1.0f;                   /* dark label, soft edge */
+                           int a = (int)(235 * k); for(int c = 0; c < 3; c++) p[c] = (uint8_t)((p[c] * (255 - a) + 0x0D * a) / 255); continue; }
+            for(int g = 0; g < 4; g++){ float d = fabsf(r - groove[g]);
+                if(d < 1.0f){ int a = (int)(40 * (1.0f - d)); for(int c = 0; c < 3; c++) p[c] = (uint8_t)(p[c] * (255 - a) / 255); } }
+        }
+    }
+    g_spin_ok = 1;
+}
+static int poster_decode_ram(const char *src){
+    lv_image_decoder_dsc_t d; memset(&d, 0, sizeof d);
+    if(lv_image_decoder_open(&d, src, NULL) != LV_RESULT_OK) return -1;
+    int w = d.header.w, h = d.header.h;
+    if(d.header.cf != LV_COLOR_FORMAT_RGB888 || w <= 0 || h <= 0 || w > PSZ || h > PSZ){ lv_image_decoder_close(&d); return -1; }
+    lv_area_t full = { 0, 0, w - 1, h - 1 }, ar = { LV_COORD_MIN, LV_COORD_MIN, LV_COORD_MIN, LV_COORD_MIN };
+    int ok = 0;
+    for(int guard = 0; guard < 40000; guard++){                     /* one MCU block per call */
+        if(lv_image_decoder_get_area(&d, &full, &ar) != LV_RESULT_OK) break;
+        const lv_draw_buf_t *db = d.decoded;
+        if(!db || !db->data) break;
+        int bw = lv_area_get_width(&ar), bh = lv_area_get_height(&ar);
+        if(ar.x1 < 0 || ar.x1 + bw > w) break;
+        for(int y = 0; y < bh; y++){
+            int dy = ar.y1 + y; if(dy < 0 || dy >= h) continue;
+            memcpy(g_posterbuf + ((size_t)dy * w + ar.x1) * 3, (const uint8_t *)db->data + (size_t)y * db->header.stride, (size_t)bw * 3);
+        }
+        if(ar.y2 >= h - 1 && ar.x2 >= w - 1){ ok = 1; break; }
+    }
+    lv_image_decoder_close(&d);
+    if(!ok) return -1;
+    memset(&g_posterdsc, 0, sizeof g_posterdsc);
+    g_posterdsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    g_posterdsc.header.cf = LV_COLOR_FORMAT_RGB888;
+    g_posterdsc.header.w = w; g_posterdsc.header.h = h; g_posterdsc.header.stride = w * 3;
+    g_posterdsc.data = g_posterbuf; g_posterdsc.data_size = (uint32_t)(w * h * 3);
+    return 0;
+}
+static void poster_reload(void){
+    if(!poster_img) return;
+    g_poster_stale = 0;
+    lv_image_set_src(poster_img, NULL);
+    g_spin_ok = 0; g_poster_baked = 0;
+    if(access("/usr/data/fiio/cover.jpg", 0) == 0 && poster_decode_ram("A:/usr/data/fiio/cover.jpg") == 0){
+        spin_from_poster();                              /* the immersive record uses the sharp cover too */
+        poster_bake(g_posterdsc.header.w, g_posterdsc.header.h);
+        lv_image_set_src(poster_img, g_poster_baked ? (const void *)&g_posterxdsc : (const void *)&g_posterdsc);
+    }
+    else if(backdrop_valid)
+        lv_image_set_src(poster_img, backdrop_src);     /* fallback: our own backdrop BMP */
+    if(g_np_poster) poster_shading_live(!g_poster_baked);
+}
 static void fsart_refresh_text(void){
-    if(fsart_title)  lv_label_set_text(fsart_title,  lv_label_get_text(title));
-    if(fsart_artist) lv_label_set_text(fsart_artist, lv_label_get_text(artist));
+    /* immersive: like Home - the title in the album colour, the artist under it, centred under the arch */
+    if(fsart_title) lv_label_set_text(fsart_title, "");     /* immersive: cover + lyrics only, no title/artist */
+    if(fsart_artist) lv_label_set_text(fsart_artist, "");
+}
+/* ---- immersive: spinning cover + synced lyrics ---- */
+static void imm_lyrics_reload(void){
+    if(!strcmp(g_lyr_path, g_np_curpath) && g_lyr_n >= 0) return;
+    copy_cstr(g_lyr_path, sizeof g_lyr_path, g_np_curpath);
+    g_lyr_n = g_np_curpath[0] ? lyrics_timed_load(g_np_curpath, g_lyr, (int)(sizeof g_lyr / sizeof g_lyr[0])) : 0;
+    if(imm_hint){ if(g_lyr_n > 0) lv_obj_add_flag(imm_hint, LV_OBJ_FLAG_HIDDEN); else lv_obj_remove_flag(imm_hint, LV_OBJ_FLAG_HIDDEN); }
+    for(int i = 0; i < 3; i++) if(imm_lyr[i]) lv_label_set_text(imm_lyr[i], "");
+}
+static uint32_t imm_last_spin, imm_last_lyr, imm_el_avg;
+static int imm_playing = 1;
+static int g_np_is_playing = 1;   /* the NORMALISED play state from ui_update (raw ipc state reads 0 while playing) */
+static int imm_frames;
+static void imm_tick(lv_timer_t *t){
+    (void)t;
+    /* Time-based: the angle follows the clock (one turn per 20 s), so the record turns at the right
+     * speed whatever frame rate the renderer manages - the 41 ms timer asks for 24 fps, and a busy
+     * frame just makes the next step a little bigger instead of slowing the record down. */
+    uint32_t el = lv_tick_elaps(imm_last_spin);
+    if(!imm_playing) imm_last_spin = lv_tick_get();      /* paused: the record stands still (and costs nothing) */
+    else if(imm_spin && !lv_obj_has_flag(imm_spin, LV_OBJ_FLAG_HIDDEN) && el >= 38){
+        imm_last_spin = lv_tick_get();
+        imm_angle = (imm_angle + (int32_t)(el * 3600 / 20000)) % 3600; lv_image_set_rotation(imm_spin, imm_angle);
+        /* Smoothing (bilinear) doubles the cost of a frame. Keep it while the device holds ~18 fps or
+         * better (~18 fps); if the average interval stays above 55 ms, drop it once - the same frame then costs
+         * about what the old 148px spin did, and the record keeps turning smoothly. */
+        imm_el_avg = imm_el_avg ? (imm_el_avg * 7) / 8 + el : el * 8;              /* x8 fixed-point EMA */
+        if(g_spin_ok && lv_image_get_antialias(imm_spin) && ++imm_frames > 24 && imm_el_avg / 8 > 55)
+            lv_image_set_antialias(imm_spin, false);
+    }
+    if(lv_tick_elaps(imm_last_lyr) < 250) return;                        /* lyrics + progress ~4x/s */
+    imm_last_lyr = lv_tick_get();
+    track_state_t st; ipc_get_state(&st);
+    int pl = g_np_is_playing;                             /* never the raw ipc state: it reports 0 while playing */
+    if(pl != imm_playing){ imm_playing = pl; if(imm_timer) lv_timer_set_period(imm_timer, pl ? 41 : 250); }
+    imm_lyrics_reload();
+    if(imm_prog && st.duration_ms > 0) lv_arc_set_value(imm_prog, (int32_t)(st.position_ms * 1000 / st.duration_ms));
+    if(g_lyr_n <= 0) return;
+    int cur = -1;
+    for(int i = 0; i < g_lyr_n && g_lyr[i].ms <= st.position_ms + 200; i++) cur = i;   /* +200: show a hair early */
+    int changed = 0;
+    for(int j = 0; j < 3; j++){
+        int i = cur - 1 + j;
+        const char *t = (i >= 0 && i < g_lyr_n) ? g_lyr[i].text : "";
+        if(strcmp(lv_label_get_text(imm_lyr[j]), t)){ lv_label_set_text(imm_lyr[j], t); changed = 1; }
+    }
+    if(changed){                                   /* next at the bottom, then current, then previous */
+        int y = 336;
+        for(int j = 2; j >= 0; j--){
+            lv_obj_update_layout(imm_lyr[j]);
+            int h = lv_obj_get_height(imm_lyr[j]);
+            y -= h; lv_obj_align(imm_lyr[j], LV_ALIGN_TOP_MID, 0, y); y -= (j == 2 ? 6 : 4);
+        }
+        /* a tall block climbs over the cover: grow the fade with it so every line stays legible */
+        if(imm_scrim){ int need = 360 - y + 72; lv_obj_set_height(imm_scrim, need > 170 ? need : 170); }
+    }
 }
 void ui_np_fsart_open(void){
     if(!fsart || fsart_on || !g_np_have) return;       /* nothing to show if no track */
@@ -352,11 +615,38 @@ void ui_np_fsart_open(void){
     lv_obj_move_foreground(fsart);
     anim_fade(fsart, LV_OPA_TRANSP, LV_OPA_COVER, 240, NULL);
     fsart_on = 1;
+    if(g_np_poster || g_np_ring){                       /* immersive: spin the cover, run the lyrics */
+        if(g_poster_stale) poster_reload();               /* decode the sharp cover now, not on every track */
+        if(imm_spin){
+            if(g_spin_ok){                              /* sharp 364px cover, native format, 1:1 - best quality */
+                lv_image_set_src(imm_spin, &g_spindsc);
+                lv_image_set_pivot(imm_spin, g_spindsc.header.w / 2, g_spindsc.header.h / 2);
+                lv_image_set_scale(imm_spin, 256); lv_image_set_antialias(imm_spin, true);
+                lv_obj_center(imm_spin);
+                lv_obj_remove_flag(imm_spin, LV_OBJ_FLAG_HIDDEN);
+                for(int k = 0; k < 6; k++) if(imm_deco[k]) lv_obj_add_flag(imm_deco[k], LV_OBJ_FLAG_HIDDEN);   /* baked in */
+                if(fsart_img) lv_obj_add_flag(fsart_img, LV_OBJ_FLAG_HIDDEN); }
+            else if(coverdsc_valid){
+                for(int k = 0; k < 6; k++) if(imm_deco[k]) lv_obj_remove_flag(imm_deco[k], LV_OBJ_FLAG_HIDDEN);                    /* fallback: the 148px cover, upscaled */
+                lv_image_set_src(imm_spin, &g_coverdsc);
+                lv_image_set_pivot(imm_spin, CBMP / 2, CBMP / 2);
+                lv_image_set_scale(imm_spin, (uint32_t)(364 * 256 / CBMP)); lv_image_set_antialias(imm_spin, false);
+                lv_obj_center(imm_spin);
+                lv_obj_remove_flag(imm_spin, LV_OBJ_FLAG_HIDDEN);
+                if(fsart_img) lv_obj_add_flag(fsart_img, LV_OBJ_FLAG_HIDDEN); }
+            else { lv_obj_add_flag(imm_spin, LV_OBJ_FLAG_HIDDEN); if(fsart_img) lv_obj_remove_flag(fsart_img, LV_OBJ_FLAG_HIDDEN); }
+        }
+        g_lyr_n = -1; imm_lyrics_reload();
+        imm_last_spin = imm_last_lyr = lv_tick_get(); imm_el_avg = 0; imm_frames = 0;
+        imm_playing = g_np_is_playing;
+        if(!imm_timer) imm_timer = lv_timer_create(imm_tick, 41, NULL);   /* ask for 24 fps */
+    }
 }
 static void fsart_hidden_cb(lv_anim_t *a){ (void)a; if(fsart) lv_obj_add_flag(fsart, LV_OBJ_FLAG_HIDDEN); }
 void ui_np_fsart_close(void){
     if(!fsart || !fsart_on) return;
     fsart_on = 0;
+    if(imm_timer){ lv_timer_delete(imm_timer); imm_timer = NULL; }
     anim_fade(fsart, LV_OPA_COVER, LV_OPA_TRANSP, 200, fsart_hidden_cb);
 }
 int ui_np_fsart_active(void){ return fsart_on; }
@@ -367,9 +657,20 @@ static void fsart_click_cb(lv_event_t *e){
     if(lv_event_get_code(e)==LV_EVENT_CLICKED) ui_np_fsart_close();
 }
 
+static void imm_btn_cb(lv_event_t *e){ (void)e; ui_np_fsart_open(); }
+static void np_mid_cb(lv_event_t *e){              /* Poster: the title opens this song's album in the Library */
+    (void)e;
+    track_state_t st; ipc_get_state(&st);
+    if(!st.have_track){ screen_show(SCR_LIBRARY); return; }
+    if(st.album[0])       library_open_album_focus(st.album, st.artist, g_np_curpath);
+    else if(st.artist[0]) library_open_artist(st.artist);
+    screen_show(SCR_LIBRARY);
+}
+
 static void cover_click_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
+    if(code == LV_EVENT_CLICKED && g_np_ring){ ui_np_fsart_open(); return; }   /* Ring: artwork -> immersive */
     lv_indev_t *id = lv_indev_active();
     if(code == LV_EVENT_PRESSED) {
         if(id){ lv_point_t p; lv_indev_get_point(id, &p); g_cover_px = p.x; g_cover_py = p.y; }
@@ -386,26 +687,45 @@ static void make_clickable(lv_obj_t *o, const char *cmd)
     lv_obj_add_event_cb(o, transport_cb, LV_EVENT_CLICKED, (void *)cmd);
 }
 
+/* The Poster style paints its controls in the ALBUM's colour even when the global accent is fixed.
+ * Dull picks (near-black / grey) fall back to the global accent so controls never go muddy. */
+static int np_rgb_vivid(int rgb){
+    int r = (rgb >> 16) & 255, g = (rgb >> 8) & 255, b = rgb & 255;
+    int mx = r > g ? (r > b ? r : b) : (g > b ? g : b), mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    return mx >= 90 && (mx - mn) >= 48;
+}
+static void np_accent_from_track(const char *path){
+    if(!path) path = "";
+    if(!strcmp(np_acc_path, path)) return;           /* once per track: this is a DB lookup */
+    copy_cstr(np_acc_path, sizeof np_acc_path, path);
+    int rgb = path[0] ? mdb_song_accent(path) : 0;
+    np_acc_set = (rgb && np_rgb_vivid(rgb));
+    if(np_acc_set) np_acc = lv_color_hex(rgb);
+}
+static lv_color_t np_col(void){ return ((g_np_poster || g_np_ring) && np_acc_set) ? np_acc : accent; }
+lv_color_t ui_media_accent(void){ return np_acc_set ? np_acc : accent; }   /* theme.h: media surfaces */
 static void apply_accent(void)
 {
     if(ring) {
-        lv_obj_set_style_arc_color(ring, accent, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(ring, np_col(), LV_PART_INDICATOR);
     }
+    if(vol_arc) lv_obj_set_style_arc_color(vol_arc, np_col(), LV_PART_INDICATOR);
+    if(imm_prog) lv_obj_set_style_arc_color(imm_prog, np_col(), LV_PART_INDICATOR);
 
     if(cover_note) {
         lv_obj_set_style_text_color(cover_note, lv_color_hex(C_WHITE), LV_PART_MAIN);
     }
 
     if(btn_pp) {
-        lv_obj_set_style_text_color(btn_pp, accent, LV_PART_MAIN);
+        lv_obj_set_style_text_color(btn_pp, np_col(), LV_PART_MAIN);
     }
 
     if(fav_icon && g_np_fav) {
-        lv_obj_set_style_text_color(fav_icon, accent, LV_PART_MAIN);
+        lv_obj_set_style_text_color(fav_icon, np_col(), LV_PART_MAIN);
     }
 
     if(mode_icon && g_np_mode > 0) {
-        lv_obj_set_style_text_color(mode_icon, accent, LV_PART_MAIN);
+        lv_obj_set_style_text_color(mode_icon, np_col(), LV_PART_MAIN);
     }
 
     if(spindle) {
@@ -463,8 +783,8 @@ static void fav_refresh(int on, int have)
     if(!btn_fav || !fav_icon) return;
     if(have) lv_obj_remove_flag(btn_fav, LV_OBJ_FLAG_HIDDEN);
     else     lv_obj_add_flag(btn_fav, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(fav_icon, on ? HEART_FILLED : HEART_OUTLINE);
-    lv_obj_set_style_text_color(fav_icon, on ? accent : lv_color_hex(C_TERTIARY), LV_PART_MAIN);
+    lv_label_set_text(fav_icon, HEART_FILLED);                     /* theme: solid, colour carries the state */
+    lv_obj_set_style_text_color(fav_icon, on ? np_col() : lv_color_hex((g_np_poster || g_np_ring) ? TH_TXT1 : C_TERTIARY), LV_PART_MAIN);
 }
 
 static void fav_click_cb(lv_event_t *e)
@@ -564,9 +884,43 @@ void ui_vinyl_spin(int want)
 }
 
 /* Now Playing style: 0 = album cover (rounded square), 1 = vinyl disc. */
-void ui_set_np_style(int vinyl)
+static void np_layout(int poster);
+static void np_layout_ring(int on);
+static lv_timer_t *g_settle_t;
+static void np_settle_cb(lv_timer_t *t){                  /* after 15 s: stop scrolling, end with "..." */
+    (void)t;
+    if(title && lv_label_get_long_mode(title) == LV_LABEL_LONG_SCROLL_CIRCULAR) lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    if(artist && lv_label_get_long_mode(artist) == LV_LABEL_LONG_SCROLL_CIRCULAR) lv_label_set_long_mode(artist, LV_LABEL_LONG_DOT);
+    lv_timer_pause(g_settle_t);
+}
+/* A long title scrolls when the track changes or Now Playing appears, then settles: an endless scroll
+ * redraws its strip ~30x/s for as long as the screen is on. */
+static void queue_click_cb(lv_event_t *e){ (void)e; queue_open(); }
+static void np_queue_place(void){ if(btn_queue && btn_mode) lv_obj_align_to(btn_queue, btn_mode, LV_ALIGN_OUT_BOTTOM_MID, 0, 0); }
+void ui_queue_changed(void){                                  /* the badge: the queue's size, hidden when empty */
+    if(!queue_badge) return;
+    int n = queue_count();
+    if(n <= 0){ lv_obj_add_flag(queue_badge, LV_OBJ_FLAG_HIDDEN); return; }
+    char b[8]; if(n > 99) snprintf(b, sizeof b, "99"); else snprintf(b, sizeof b, "%d", n);
+    if(strcmp(lv_label_get_text(queue_badge_lbl), b)) lv_label_set_text(queue_badge_lbl, b);
+    lv_obj_set_style_bg_color(queue_badge, ui_current_accent(), 0);
+    lv_obj_remove_flag(queue_badge, LV_OBJ_FLAG_HIDDEN);
+}
+void ui_np_tags_changed(void){ g_lyr_n = -1; g_lyr_path[0] = 0; }   /* immersive re-reads the new lyrics */
+void ui_np_rescroll(void){
+    ui_queue_changed();                                       /* Now Playing shown: the queue's count */
+    if(!title || g_np_poster) return;                     /* the Poster wraps its title instead */
+    lv_label_set_long_mode(title, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    if(g_np_ring && artist) lv_label_set_long_mode(artist, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    if(!g_settle_t) g_settle_t = lv_timer_create(np_settle_cb, 15000, NULL);
+    else { lv_timer_reset(g_settle_t); lv_timer_resume(g_settle_t); }
+}
+void ui_set_np_style(int style)
 {
     if(!cover) return;
+    int vinyl = (style == 1);
+    g_np_poster = (style == 2);
+    g_np_ring = (style == 3);
     g_np_vinyl = vinyl;
     lv_obj_set_style_radius(cover, vinyl ? (COVER_D/2) : 14, LV_PART_MAIN);
     if(spindle) {
@@ -577,6 +931,116 @@ void ui_set_np_style(int vinyl)
         ui_vinyl_spin(0);                                  /* stop the spin */
         if(cover_img) lv_image_set_rotation(cover_img, 0); /* Cover must sit upright */
     }
+    np_layout(g_np_poster);
+    np_layout_ring(g_np_ring);
+    np_queue_place();
+    apply_accent();
+    ui_np_rescroll();
+}
+/* Poster: full-bleed sharp cover, big title in the middle, heart + play-mode on the right, immersive on
+ * the left, glyph-only transport, seek ring on the top rim, volume on the bottom rim, a heavy fade over the
+ * bottom third. Cover/Vinyl: the original layout, restored exactly. */
+/* Ring (np_style 3): a round cover with the progress ring hugging it (drag round the ring to seek), the
+ * heart at the ring's left apex and play mode at its right apex, title and artist below (scrolling when
+ * long; tap to open the album with this song focused), a large play/pause in the album colour with the
+ * times beside Previous / Next. Tapping the artwork opens immersive mode. Runs after np_layout(0), which
+ * has already restored the classic layout, so only the differences are set here. */
+#define RING_Y   124                      /* ring centre */
+#define RING_RR  84                       /* ring radius */
+static void np_layout_ring(int on){
+    if(!on) return;
+    SHOW(cover, 1); SHOW(album, 0); SHOW(btn_imm, 0); SHOW(vol_arc, 0); SHOW(np_mid_btn, 1);
+    if(cover){ lv_obj_set_style_radius(cover, COVER_D / 2, LV_PART_MAIN);
+               lv_obj_align(cover, LV_ALIGN_TOP_MID, 0, RING_Y - COVER_D / 2); }
+    if(spindle) lv_obj_add_flag(spindle, LV_OBJ_FLAG_HIDDEN);
+    if(ring){
+        lv_obj_set_size(ring, 2 * RING_RR, 2 * RING_RR);
+        lv_obj_align(ring, LV_ALIGN_TOP_MID, 0, RING_Y - RING_RR);
+        lv_arc_set_mode(ring, LV_ARC_MODE_NORMAL);
+        lv_arc_set_rotation(ring, 270); lv_arc_set_bg_angles(ring, 0, 360);          /* from 12 o'clock */
+        lv_obj_set_style_arc_width(ring, TH_ARC_IND, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(ring, TH_ARC_IND, LV_PART_INDICATOR);
+    }
+    g_arc_rot = 270; g_arc_sweep = 360; g_arc_rev = 0;
+    g_ring_cx = 180; g_ring_cy = RING_Y; g_ring_r = RING_RR; g_tol_grab = 18; g_tol_wander = 32;  /* clear of the title */
+    if(btn_fav)   lv_obj_align(btn_fav,   LV_ALIGN_TOP_MID, -(RING_RR + 34), RING_Y - 22);   /* left apex */
+    if(btn_sleep) lv_obj_align(btn_sleep, LV_ALIGN_TOP_MID, -(RING_RR + 34), RING_Y - 22);
+    if(btn_mode)  lv_obj_align(btn_mode,  LV_ALIGN_TOP_MID,  (RING_RR + 34), RING_Y - 22);   /* right apex */
+    if(title){
+        lv_obj_set_style_text_font(title, &s_font24, 0);
+        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(title, lv_color_hex(TH_TXT1), 0);
+        lv_obj_set_size(title, 272, LV_SIZE_CONTENT);
+        lv_label_set_long_mode(title, LV_LABEL_LONG_SCROLL_CIRCULAR);     /* scrolls only when too long */
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 222);
+    }
+    if(artist){
+        lv_obj_set_style_text_font(artist, &s_font16, 0);
+        lv_obj_set_style_text_color(artist, lv_color_hex(TH_TXT2), 0);
+        lv_obj_set_width(artist, 272);
+        lv_obj_set_style_text_align(artist, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(artist, LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_align(artist, LV_ALIGN_TOP_MID, 0, 252);
+    }
+    if(np_mid_btn){ lv_obj_set_size(np_mid_btn, 272, 60); lv_obj_align(np_mid_btn, LV_ALIGN_TOP_MID, 0, 216); }
+    lv_color_t w = lv_color_hex(TH_TXT1);
+    if(btn_prev){ lv_obj_set_style_text_color(btn_prev, w, 0); lv_obj_align(btn_prev, LV_ALIGN_TOP_MID, -64, 290); }
+    if(btn_next){ lv_obj_set_style_text_color(btn_next, w, 0); lv_obj_align(btn_next, LV_ALIGN_TOP_MID,  64, 290); }
+    if(btn_pp){ lv_obj_set_style_text_font(btn_pp, &lv_font_montserrat_36, 0); lv_obj_align(btn_pp, LV_ALIGN_TOP_MID, 0, 286); }
+    lv_color_t tc = lv_color_hex(TH_TXT2);
+    if(t_elapsed){ lv_obj_set_style_text_font(t_elapsed, TH_F_CAPTION, 0); lv_obj_set_style_text_color(t_elapsed, tc, 0);
+                   lv_obj_align(t_elapsed, LV_ALIGN_TOP_MID, -108, 294); }
+    if(t_remain){  lv_obj_set_style_text_font(t_remain, TH_F_CAPTION, 0); lv_obj_set_style_text_color(t_remain, tc, 0);
+                   lv_obj_align(t_remain, LV_ALIGN_TOP_MID, 108, 294); }
+    SHOW(t_sep, 0);
+}
+static void np_layout(int poster){
+    SHOW(poster_img, poster); poster_shading_live(poster && !g_poster_baked);
+    SHOW(btn_imm, poster); SHOW(vol_arc, 0);   /* volume arc retired: the bottom rim is the seek bar */
+    SHOW(cover, !poster); SHOW(album, !poster); SHOW(np_dots[0], !poster); SHOW(np_dots[1], !poster);
+    if(backdrop){ if(poster) lv_obj_add_flag(backdrop, LV_OBJ_FLAG_HIDDEN); else if(backdrop_valid) lv_obj_remove_flag(backdrop, LV_OBJ_FLAG_HIDDEN); }
+    g_arc_rot = poster ? 28 : ARC_ROT; g_arc_sweep = poster ? 124 : ARC_SWEEP; g_arc_rev = poster;
+    g_ring_cx = 180; g_ring_cy = 180; g_ring_r = ARC_D / 2; g_tol_grab = 34; g_tol_wander = 48;
+    if(ring){ lv_obj_set_size(ring, ARC_D, ARC_D); lv_obj_align(ring, LV_ALIGN_CENTER, 0, 0); }
+    if(cover) lv_obj_align(cover, LV_ALIGN_TOP_MID, 0, 42);
+    if(btn_pp) lv_obj_set_style_text_font(btn_pp, &lv_font_montserrat_32, 0);
+    if(artist){ lv_obj_set_style_text_font(artist, &s_font16, 0); lv_label_set_long_mode(artist, LV_LABEL_LONG_DOT); }
+    if(ring){ lv_arc_set_bg_angles(ring, 0, g_arc_sweep); lv_arc_set_rotation(ring, g_arc_rot);
+              lv_arc_set_mode(ring, poster ? LV_ARC_MODE_REVERSE : LV_ARC_MODE_NORMAL);   /* fills from the left end */
+              lv_obj_set_style_arc_width(ring, poster ? 4 : 6, LV_PART_MAIN); lv_obj_set_style_arc_width(ring, poster ? 4 : 6, LV_PART_INDICATOR); }
+    if(btn_fav)   lv_obj_align(btn_fav,   LV_ALIGN_TOP_MID, poster ? 142 : 118, poster ? 144 : 126);
+    if(btn_sleep) lv_obj_align(btn_sleep, LV_ALIGN_TOP_MID, poster ? 142 : 118, poster ? 144 : 126);
+    if(btn_mode)  lv_obj_align(btn_mode,  LV_ALIGN_TOP_MID, poster ? 140 : -118, poster ? 186 : 126);
+    if(title){
+        lv_obj_set_style_text_font(title, poster ? &s_font28 : &s_font20, 0);
+        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(title, poster ? 236 : 260);
+        lv_obj_set_height(title, poster ? 70 : LV_SIZE_CONTENT);          /* two lines, then ... */
+        lv_label_set_long_mode(title, poster ? LV_LABEL_LONG_DOT : LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_align(title, LV_ALIGN_TOP_MID, 0, poster ? 146 : 198);
+    }
+    SHOW(title_sh, poster); SHOW(artist_sh, poster); SHOW(np_mid_btn, poster);
+    if(title) lv_obj_set_style_text_color(title, lv_color_hex(C_WHITE), 0);
+    if(title_sh){ lv_obj_set_style_text_font(title_sh, &s_font28, 0); lv_obj_set_size(title_sh, 236, 70);
+                  lv_label_set_long_mode(title_sh, LV_LABEL_LONG_DOT); lv_obj_align(title_sh, LV_ALIGN_TOP_MID, 1, 148); }
+    if(artist_sh){ lv_obj_set_style_text_font(artist_sh, &s_font16, 0); lv_obj_set_width(artist_sh, 220);
+                   lv_label_set_long_mode(artist_sh, LV_LABEL_LONG_DOT); lv_obj_align(artist_sh, LV_ALIGN_TOP_MID, 1, 224); }
+    if(artist){ lv_obj_set_width(artist, poster ? 220 : 238);
+                lv_obj_set_style_text_color(artist, lv_color_hex(poster ? 0xE6E6EA : C_SECONDARY), 0);
+                lv_obj_align(artist, LV_ALIGN_TOP_MID, 0, poster ? 222 : 226); }
+    lv_color_t side = lv_color_hex(poster ? 0xF6F6F8 : C_TERTIARY);
+    if(btn_prev){ lv_obj_set_style_text_color(btn_prev, side, 0); lv_obj_align(btn_prev, LV_ALIGN_TOP_MID, poster ? -62 : -60, poster ? 272 : 284); }
+    if(btn_next){ lv_obj_set_style_text_color(btn_next, side, 0); lv_obj_align(btn_next, LV_ALIGN_TOP_MID, poster ?  62 :  60, poster ? 272 : 284); }
+    if(btn_pp)    lv_obj_align(btn_pp, LV_ALIGN_TOP_MID, 0, poster ? 268 : 280);
+    lv_color_t tc = lv_color_hex(poster ? TH_TXT1 : C_TERTIARY);
+    /* poster: elapsed beside Previous and remaining beside Next, out towards the arc's two ends; no slash */
+    /* y 252: the label's middle sits level with the arc's ends (180 + 170*sin(152 deg) ~ 260), clear of the stroke */
+    if(t_elapsed) lv_obj_set_style_text_font(t_elapsed, poster ? TH_F_CAPTION : &lv_font_montserrat_14, 0);
+    if(t_remain)  lv_obj_set_style_text_font(t_remain,  poster ? TH_F_CAPTION : &lv_font_montserrat_14, 0);
+    if(t_elapsed){ lv_obj_set_style_text_color(t_elapsed, tc, 0); lv_obj_align(t_elapsed, LV_ALIGN_TOP_MID, poster ? -104 : -46, poster ? 252 : 318); }
+    if(t_sep){     lv_obj_align(t_sep, LV_ALIGN_TOP_MID, 0, 318); SHOW(t_sep, !poster); }
+    if(t_remain){  lv_obj_set_style_text_color(t_remain, tc, 0); lv_obj_align(t_remain, LV_ALIGN_TOP_MID, poster ? 104 : 46, poster ? 252 : 318); }
+    if(poster) poster_reload();
 }
 
 static void set_cover_fallback(bool show)
@@ -594,7 +1058,9 @@ static void set_cover_fallback(bool show)
  * lv_bmp image can't be rotated by the SW renderer (renders black) because the
  * image cache is off; a true-colour RAM buffer transforms fine, so the vinyl
  * can spin. The BMP is 24-bit BGR, bottom-up, 148*3=444 bytes/row (no padding). */
+#ifndef CBMP
 #define CBMP 148
+#endif
 static uint8_t g_coverbuf[CBMP*CBMP*4];
 static lv_image_dsc_t g_coverdsc;
 static int load_cover_dsc(const char *path)
@@ -796,12 +1262,14 @@ static int g_accent_gray = 0;   /* currently showing the idle/no-track neutral *
  * mode 0 = dynamic (album-art OKLab); 1 = static (fixed user colour: no OKLab
  * compute, no SONG.ACCENT read/write). g_accent_color is 0xRRGGBB. */
 static _Atomic int g_accent_mode = 0;   /* read by art worker/prewarm threads -> atomic */
-static uint32_t    g_accent_color = 0xF23260;   /* UI-thread only */
+static uint32_t    g_accent_color = UI_RED;     /* UI-thread only */
 static uint32_t    g_static_last  = 0xFFFFFFFFu; /* last static accent actually applied (skip redundant re-applies) */
 int ui_accent_is_static(void){ return g_accent_mode == 1; }   /* worker/prewarm gate */
 
 static void update_accent_seed(const track_state_t *st)
 {
+    if(st && st->have_track){ char was[520]; copy_cstr(was, sizeof was, np_acc_path);
+        np_accent_from_track(st->path); if(strcmp(was, np_acc_path)) apply_accent(); }
     if(g_accent_mode == 1){            /* static: fixed colour; repaint only when it actually changed -
                                         * the 332x332 arc invalidation is ~85% of the screen every tick */
         if(g_static_last != g_accent_color){
@@ -848,6 +1316,8 @@ static int g_art_applied = 0;
  * path, and failed decode) so stale art isn't republished to Home/Saver. */
 static void clear_art_state(void)
 {
+    if(poster_img) lv_image_set_src(poster_img, NULL);   /* no art: plain dark poster */
+    g_poster_stale = 1; g_bd_ok = 0;
     cover_valid = thumb_valid = backdrop_valid = 0;
     coverdsc_valid = 0;
     last_art_key[0] = '\0';
@@ -946,12 +1416,18 @@ static void apply_art(const art_req_t *job)
         int acc_rgb = mdb_song_accent(job->track);
         if(acc_rgb){ accent = lv_color_hex(acc_rgb); apply_accent(); }
     }
+    np_acc_path[0] = '\0'; np_accent_from_track(job->track); apply_accent();   /* poster: album colour */
     copy_cstr(last_art_key, sizeof last_art_key, job->art_key);   /* cache key (album+dir) */
     if(backdrop) {
         lv_image_set_src(backdrop, backdrop_src);
         lv_obj_remove_flag(backdrop, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_background(backdrop);
+        if(g_np_poster) lv_obj_add_flag(backdrop, LV_OBJ_FLAG_HIDDEN);   /* the sharp poster replaces it */
     }
+    if(g_np_poster) poster_reload();                     /* only the Poster shows it; immersive decodes on open */
+    else g_poster_stale = 1;
+    backdrop_to_ram();                                    /* the blurred backdrop, once, into RAM */
+    if(backdrop && backdrop_valid){ lv_image_set_src(backdrop, NULL); lv_image_set_src(backdrop, ui_current_backdrop_img()); }
     displayed_idx = job->idx;   /* this buffer is now the one on screen */
     g_art_applied = 1;          /* main.c re-pushes Home/Saver/npmenu art next loop */
 }
@@ -1463,7 +1939,7 @@ const char *ui_current_backdrop_src(void)
  * so fallback glyphs sit on the same baseline; LVGL uses the PRIMARY font's line-height, and
  * each intl line-height (20/23/28) fits within Montserrat's (20/24/28) so nothing clips.
  * We keep mutable copies because .fallback must be set on non-const fonts. */
-static lv_font_t s_font20, s_font18, s_font16, s_font14;      /* Montserrat, chain heads */
+static lv_font_t s_font28, s_font24, s_font20, s_font18, s_font16, s_font14;      /* Montserrat, chain heads */
 static lv_font_t s_intl20, s_intl18, s_intl16, s_intl14;      /* intl link (fallback -> Source Han) */
 static void ui_fonts_init(void)
 {
@@ -1472,6 +1948,8 @@ static void ui_fonts_init(void)
     s_intl18 = font_intl_18; s_intl18.fallback = &lv_font_source_han_16_cjk;
     s_intl16 = font_intl_16; s_intl16.fallback = &lv_font_source_han_16_cjk;
     s_intl14 = font_intl_14; s_intl14.fallback = &lv_font_source_han_16_cjk;
+    s_font28 = lv_font_montserrat_28; s_font28.fallback = &s_intl20;   /* poster title */
+    s_font24 = lv_font_montserrat_24; s_font24.fallback = &s_intl20;   /* ring title */
     s_font20 = lv_font_montserrat_20; s_font20.fallback = &s_intl20;
     s_font18 = lv_font_montserrat_18; s_font18.fallback = &s_intl18;
     s_font16 = lv_font_montserrat_16; s_font16.fallback = &s_intl16;
@@ -1490,6 +1968,8 @@ const lv_font_t *ui_text_font(int px){
 const lv_font_t *ui_font_cjk(int size)
 {
     ui_fonts_init();
+    if(size >= 28) return &s_font28;                   /* 24/28 carry the same non-Latin fallback */
+    if(size >= 24) return &s_font24;
     if(size >= 20) return &s_font20;
     if(size >= 18) return &s_font18;
     if(size >= 16) return &s_font16;
@@ -1538,6 +2018,56 @@ void ui_create(lv_obj_t *root)
     lv_obj_add_flag(backdrop, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(backdrop, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
 
+    /* ---- Poster layers (hidden unless np_style == 2): sharp cover, dim, top whisper, bottom-third fade ---- */
+    poster_img = lv_image_create(scr);
+    lv_obj_set_size(poster_img, 364, 364);
+    lv_obj_align(poster_img, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(poster_img, LV_OBJ_FLAG_CLICKABLE);
+    poster_dim = lv_obj_create(scr);
+    lv_obj_remove_style_all(poster_dim);
+    lv_obj_set_size(poster_dim, 360, 360);
+    lv_obj_set_style_bg_color(poster_dim, lv_color_hex(C_BLACK), 0);
+    lv_obj_set_style_bg_opa(poster_dim, 56, 0);                     /* ~22%: keeps the art rich */
+    lv_obj_clear_flag(poster_dim, LV_OBJ_FLAG_CLICKABLE);
+    poster_top = lv_obj_create(scr);                                 /* legibility for the time at the top */
+    lv_obj_remove_style_all(poster_top);
+    lv_obj_set_size(poster_top, 360, 90);
+    lv_obj_align(poster_top, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_color(poster_top, lv_color_hex(C_BLACK), 0);
+    lv_obj_set_style_bg_grad_color(poster_top, lv_color_hex(C_BLACK), 0);
+    lv_obj_set_style_bg_grad_dir(poster_top, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_main_opa(poster_top, 130, 0);
+    lv_obj_set_style_bg_grad_opa(poster_top, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(poster_top, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(poster_top, LV_OBJ_FLAG_CLICKABLE);
+    poster_fade = lv_obj_create(scr);                                /* bottom third, ramps in hard */
+    lv_obj_remove_style_all(poster_fade);
+    lv_obj_set_size(poster_fade, 360, 160);
+    lv_obj_align(poster_fade, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(poster_fade, lv_color_hex(C_BLACK), 0);
+    lv_obj_set_style_bg_grad_color(poster_fade, lv_color_hex(C_BLACK), 0);
+    lv_obj_set_style_bg_grad_dir(poster_fade, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_main_opa(poster_fade, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_grad_opa(poster_fade, 245, 0);
+    lv_obj_set_style_bg_main_stop(poster_fade, 0, 0);
+    lv_obj_set_style_bg_grad_stop(poster_fade, 150, 0);             /* full strength ~60% of the way down */
+    lv_obj_set_style_bg_opa(poster_fade, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(poster_fade, LV_OBJ_FLAG_CLICKABLE);
+    np_scrim = lv_obj_create(scr);                                   /* soft dark band behind the title */
+    lv_obj_remove_style_all(np_scrim);
+    lv_obj_set_size(np_scrim, 360, 150);
+    lv_obj_align(np_scrim, LV_ALIGN_TOP_MID, 0, 128);
+    lv_obj_clear_flag(np_scrim, LV_OBJ_FLAG_CLICKABLE);
+    for(int h = 0; h < 2; h++){                                      /* fade in, then fade out: no edges */
+        lv_obj_t *g = lv_obj_create(np_scrim); lv_obj_remove_style_all(g);
+        lv_obj_set_size(g, 360, 75); lv_obj_set_pos(g, 0, h * 75); lv_obj_clear_flag(g, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(g, lv_color_hex(C_BLACK), 0); lv_obj_set_style_bg_grad_color(g, lv_color_hex(C_BLACK), 0);
+        lv_obj_set_style_bg_grad_dir(g, LV_GRAD_DIR_VER, 0);
+        lv_obj_set_style_bg_main_opa(g, h ? 105 : 0, 0); lv_obj_set_style_bg_grad_opa(g, h ? 0 : 105, 0);
+        lv_obj_set_style_bg_opa(g, LV_OPA_COVER, 0);
+    }
+    SHOW(poster_img, 0); SHOW(poster_dim, 0); SHOW(poster_top, 0); SHOW(poster_fade, 0); SHOW(np_scrim, 0);
+
     ring = lv_arc_create(scr);
     lv_obj_set_size(ring, ARC_D, ARC_D);
     lv_obj_align(ring, LV_ALIGN_CENTER, 0, 0);
@@ -1552,6 +2082,22 @@ void ui_create(lv_obj_t *root)
     lv_obj_set_style_arc_width(ring, 6, LV_PART_INDICATOR);
     lv_obj_set_style_arc_color(ring, accent, LV_PART_INDICATOR);
     lv_obj_set_style_arc_opa(ring, LV_OPA_COVER, LV_PART_INDICATOR);
+    /* Poster: volume shown on the bottom rim (display-only - the hardware buttons set it, and a touch
+     * arc here would fight the page swipe) */
+    vol_arc = lv_arc_create(scr);
+    lv_obj_remove_style(vol_arc, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(vol_arc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(vol_arc, ARC_D, ARC_D);
+    lv_obj_align(vol_arc, LV_ALIGN_CENTER, 0, 0);
+    lv_arc_set_rotation(vol_arc, 0);
+    lv_arc_set_bg_angles(vol_arc, 52, 128);
+    lv_arc_set_mode(vol_arc, LV_ARC_MODE_REVERSE);
+    lv_arc_set_range(vol_arc, 0, VOL_MAX);
+    lv_obj_set_style_arc_width(vol_arc, 4, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(vol_arc, lv_color_hex(C_LINE_SOFT), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(vol_arc, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(vol_arc, accent, LV_PART_INDICATOR);
+    SHOW(vol_arc, 0);
     /* draggable seek: a small knob thumb + scrub handler */
     lv_obj_set_style_bg_color(ring, lv_color_hex(C_WHITE), LV_PART_KNOB);
     lv_obj_set_style_bg_opa(ring, LV_OPA_COVER, LV_PART_KNOB);
@@ -1654,6 +2200,26 @@ void ui_create(lv_obj_t *root)
     lv_obj_align(btn_mode, LV_ALIGN_TOP_MID, -118, 126);
     lv_obj_add_flag(btn_mode, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn_mode, mode_click_cb, LV_EVENT_PRESSED, NULL);
+    btn_queue = lv_button_create(scr);                      /* the Queue: a playlist icon with a count */
+    lv_obj_remove_style_all(btn_queue);
+    lv_obj_set_size(btn_queue, 44, 40);
+    lv_obj_set_ext_click_area(btn_queue, 4);
+    lv_obj_add_event_cb(btn_queue, queue_click_cb, LV_EVENT_CLICKED, NULL);
+    { lv_obj_t *ql = lv_label_create(btn_queue); lv_label_set_text(ql, LV_SYMBOL_LIST);
+      lv_obj_set_style_text_font(ql, &lv_font_montserrat_18, 0); lv_obj_set_style_text_color(ql, lv_color_hex(0xFFFFFF), 0); lv_obj_center(ql); }
+    queue_badge = lv_obj_create(btn_queue);
+    lv_obj_remove_style_all(queue_badge);
+    lv_obj_set_size(queue_badge, 17, 17);
+    lv_obj_align(queue_badge, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_set_style_radius(queue_badge, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(queue_badge, lv_color_hex(0xE4122C), 0);
+    lv_obj_set_style_bg_opa(queue_badge, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(queue_badge, LV_OBJ_FLAG_CLICKABLE);
+    queue_badge_lbl = lv_label_create(queue_badge);
+    lv_obj_set_style_text_font(queue_badge_lbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(queue_badge_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_center(queue_badge_lbl);
+    lv_obj_add_flag(queue_badge, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(btn_mode, mode_click_cb, LV_EVENT_CLICKED, NULL);
     mode_icon = lv_label_create(btn_mode);
     lv_obj_set_style_text_font(mode_icon, &font_icons_28, LV_PART_MAIN);
@@ -1666,6 +2232,26 @@ void ui_create(lv_obj_t *root)
     lv_obj_center(mode_one);   /* sits between the loop arrows */
     lv_obj_add_flag(mode_one, LV_OBJ_FLAG_HIDDEN);
     mode_refresh(cfg_get_int("work_mode", 0));
+
+    /* Poster: immersive (spinning cover + synced lyrics) shortcut, left side opposite the heart */
+    btn_imm = lv_button_create(scr);
+    lv_obj_remove_style_all(btn_imm);
+    lv_obj_set_size(btn_imm, 44, 44);
+    lv_obj_align(btn_imm, LV_ALIGN_TOP_MID, -142, 144);
+    lv_obj_add_event_cb(btn_imm, imm_btn_cb, LV_EVENT_CLICKED, NULL);
+    {   lv_obj_t *g = lv_label_create(btn_imm);                         /* theme: one icon family */
+        lv_label_set_text(g, TH_IC_RECORD);
+        lv_obj_set_style_text_font(g, &font_theme_20, 0);
+        lv_obj_set_style_text_color(g, lv_color_hex(TH_TXT1), 0);
+        lv_obj_center(g); lv_obj_clear_flag(g, LV_OBJ_FLAG_CLICKABLE); }
+    SHOW(btn_imm, 0);
+
+    title_sh = lv_label_create(scr);                                 /* poster drop shadows (behind) */
+    artist_sh = lv_label_create(scr);
+    for(int k = 0; k < 2; k++){ lv_obj_t *o = k ? artist_sh : title_sh;
+        lv_obj_set_style_text_color(o, lv_color_hex(C_BLACK), 0); lv_obj_set_style_text_opa(o, 170, 0);
+        lv_obj_set_style_text_align(o, LV_TEXT_ALIGN_CENTER, 0); lv_label_set_text(o, "");
+        lv_obj_clear_flag(o, LV_OBJ_FLAG_CLICKABLE); lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); }
 
     title = lv_label_create(scr);
     lv_obj_set_width(title, 260);
@@ -1687,6 +2273,14 @@ void ui_create(lv_obj_t *root)
     lv_label_set_long_mode(album, LV_LABEL_LONG_DOT);
     lv_label_set_text(album, "");
     lv_obj_align(album, LV_ALIGN_TOP_MID, 0, 246);
+
+    /* Poster: tap anywhere on the title / artist block to open this song's album, highlighted */
+    np_mid_btn = lv_button_create(scr);
+    lv_obj_remove_style_all(np_mid_btn);
+    lv_obj_set_size(np_mid_btn, 236, 108);
+    lv_obj_align(np_mid_btn, LV_ALIGN_TOP_MID, 0, 140);
+    lv_obj_add_event_cb(np_mid_btn, np_mid_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(np_mid_btn, LV_OBJ_FLAG_HIDDEN);
 
     btn_prev = lv_label_create(scr);
     style_text(btn_prev, &lv_font_montserrat_28, lv_color_hex(C_TERTIARY));
@@ -1715,7 +2309,7 @@ void ui_create(lv_obj_t *root)
     lv_label_set_text(t_elapsed, "0:00");
     lv_obj_align(t_elapsed, LV_ALIGN_TOP_MID, -46, 318);
 
-    lv_obj_t *t_sep = lv_label_create(scr);
+    t_sep = lv_label_create(scr);
     style_text(t_sep, &lv_font_montserrat_14, lv_color_hex(C_LINE_SOFT));
     lv_label_set_text(t_sep, "/");
     lv_obj_align(t_sep, LV_ALIGN_TOP_MID, 0, 318);
@@ -1729,6 +2323,7 @@ void ui_create(lv_obj_t *root)
     /* page dots - Now Playing is the left page, the hub (right swipe) the right */
     for(int i=0;i<2;i++){
         lv_obj_t *dot = lv_obj_create(scr);
+        np_dots[i] = dot;
         lv_obj_remove_style_all(dot);
         lv_obj_set_size(dot, 7, 7);
         lv_obj_align(dot, LV_ALIGN_BOTTOM_MID, i==0 ? -8 : 8, -14);
@@ -1752,42 +2347,103 @@ void ui_create(lv_obj_t *root)
     fsart_img = lv_image_create(fsart);                    /* the 364px stock cover, centred (bezel crops) */
     lv_obj_center(fsart_img);
     lv_obj_clear_flag(fsart_img, LV_OBJ_FLAG_CLICKABLE);
+    /* immersive: the RAM-decoded cover, scaled to fill the screen and slowly spun like a record
+     * (a file-sourced image can't be rotated by the SW renderer - see load_cover_dsc) */
+    imm_spin = lv_image_create(fsart);
+    lv_obj_center(imm_spin);
+    lv_obj_clear_flag(imm_spin, LV_OBJ_FLAG_CLICKABLE);
+    lv_image_set_pivot(imm_spin, CBMP / 2, CBMP / 2);
+    lv_image_set_scale(imm_spin, (uint32_t)(364 * 256 / CBMP));
+    lv_image_set_antialias(imm_spin, false);               /* cheaper per frame; soft art hides it */
+    lv_obj_add_flag(imm_spin, LV_OBJ_FLAG_HIDDEN);
+    for(int g = 0; g < 4; g++){                            /* faint grooves (rotation-symmetric: never redrawn) */
+        lv_obj_t *gr = lv_obj_create(fsart); lv_obj_remove_style_all(gr); imm_deco[g] = gr;
+        int d = 340 - g * 44; lv_obj_set_size(gr, d, d); lv_obj_center(gr);
+        lv_obj_set_style_radius(gr, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(gr, 1, 0); lv_obj_set_style_border_color(gr, lv_color_hex(C_BLACK), 0);
+        lv_obj_set_style_border_opa(gr, 40, 0); lv_obj_clear_flag(gr, LV_OBJ_FLAG_CLICKABLE);
+    }
+    {   lv_obj_t *lbl = lv_obj_create(fsart); lv_obj_remove_style_all(lbl); imm_deco[4] = lbl;   /* label + spindle */
+        lv_obj_set_size(lbl, 54, 54); lv_obj_center(lbl); lv_obj_clear_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_radius(lbl, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(lbl, lv_color_hex(0x0C0C0E), 0); lv_obj_set_style_bg_opa(lbl, 235, 0);
+        lv_obj_t *h = lv_obj_create(fsart); lv_obj_remove_style_all(h); imm_deco[5] = h;
+        lv_obj_set_size(h, 8, 8); lv_obj_center(h); lv_obj_clear_flag(h, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_radius(h, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(h, lv_color_hex(0x2A2A2E), 0); lv_obj_set_style_bg_opa(h, LV_OPA_COVER, 0); }
+    imm_prog = lv_arc_create(fsart);                       /* thin progress on the top rim */
+    lv_obj_remove_style(imm_prog, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(imm_prog, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(imm_prog, 344, 344); lv_obj_center(imm_prog);
+    lv_arc_set_rotation(imm_prog, 208); lv_arc_set_bg_angles(imm_prog, 0, 124); lv_arc_set_range(imm_prog, 0, 1000);
+    lv_obj_set_style_arc_width(imm_prog, 3, LV_PART_MAIN); lv_obj_set_style_arc_color(imm_prog, lv_color_hex(C_LINE_SOFT), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(imm_prog, 3, LV_PART_INDICATOR); lv_obj_set_style_arc_color(imm_prog, accent, LV_PART_INDICATOR);
 
     /* bottom scrim so title/artist stay legible over any cover */
     lv_obj_t *scrim = lv_obj_create(fsart);
+    imm_scrim = scrim;
     lv_obj_remove_style_all(scrim);
-    lv_obj_set_size(scrim, 360, 130);
+    lv_obj_set_size(scrim, 360, 170);                       /* bottom third: the lyrics sit in here */
     lv_obj_align(scrim, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_main_stop(scrim, 0, 0);
+    lv_obj_set_style_bg_grad_stop(scrim, 140, 0);
     lv_obj_set_style_bg_color(scrim, lv_color_hex(C_BLACK), 0);
     lv_obj_set_style_bg_grad_color(scrim, lv_color_hex(C_BLACK), 0);
     lv_obj_set_style_bg_grad_dir(scrim, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_bg_main_opa(scrim, LV_OPA_TRANSP, 0);  /* transparent at top */
-    lv_obj_set_style_bg_grad_opa(scrim, LV_OPA_80, 0);      /* darker at the bottom */
+    lv_obj_set_style_bg_grad_opa(scrim, 205, 0);            /* darker at the bottom, reached early (a touch lighter) */
     lv_obj_set_style_bg_opa(scrim, LV_OPA_COVER, 0);
     lv_obj_clear_flag(scrim, LV_OBJ_FLAG_CLICKABLE);
 
+    /* synced lyrics: previous (dim) / current (bright) / next (dim). They wrap instead of being cut, and
+     * the block is anchored to the bottom, so a long current line pushes the previous one up. */
+    for(int j = 0; j < 3; j++){
+        imm_lyr[j] = lv_label_create(fsart);
+        lv_obj_set_width(imm_lyr[j], j == 1 ? 272 : (j == 0 ? 250 : 226));  /* the circle narrows downward */
+        style_text(imm_lyr[j], j == 1 ? &s_font20 : &s_font16, lv_color_hex(j == 1 ? 0xF6F6F8 : 0xA4A4AA));
+        lv_obj_set_style_text_align(imm_lyr[j], LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(imm_lyr[j], LV_LABEL_LONG_WRAP);             /* reflow, never cut mid-line */
+        lv_obj_set_style_max_height(imm_lyr[j], j == 1 ? 4 * 26 : 2 * 21, 0);   /* current up to 4 lines */
+        lv_label_set_text(imm_lyr[j], "");
+        lv_obj_clear_flag(imm_lyr[j], LV_OBJ_FLAG_CLICKABLE);
+    }
+    imm_hint = lv_label_create(fsart);
+    style_text(imm_hint, &s_font14, lv_color_hex(0x8E8E93));
+    lv_label_set_text(imm_hint, "No synced lyrics for this track");
+    lv_obj_align(imm_hint, LV_ALIGN_TOP_MID, 0, 266);
+    lv_obj_clear_flag(imm_hint, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(imm_hint, LV_OBJ_FLAG_HIDDEN);
+
     fsart_title = lv_label_create(fsart);
-    lv_obj_set_width(fsart_title, 240);   /* round-screen chord at y~310 is ~249px wide; 300 overran the bezel */
-    style_text(fsart_title, &s_font20, lv_color_hex(C_WHITE));
+    lv_obj_set_width(fsart_title, 200);   /* two rows under the top arch, like Home */
+    style_text(fsart_title, &s_font18, lv_color_hex(0xE6E6EA));
     lv_obj_set_style_text_align(fsart_title, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(fsart_title, LV_LABEL_LONG_DOT);
-    lv_obj_align(fsart_title, LV_ALIGN_BOTTOM_MID, 0, -50);
+    lv_obj_align(fsart_title, LV_ALIGN_TOP_MID, 0, 50);   /* clear of the arch: at x=+-100 it sits at y~40 */
     lv_obj_clear_flag(fsart_title, LV_OBJ_FLAG_CLICKABLE);
 
     fsart_artist = lv_label_create(fsart);
-    lv_obj_set_width(fsart_artist, 176);   /* chord at y~334 is only ~186px wide; 280 was clipped by the bezel */
-    style_text(fsart_artist, &s_font16, lv_color_hex(C_SECONDARY));
+    lv_obj_set_width(fsart_artist, 190);
+    style_text(fsart_artist, &s_font16, lv_color_hex(0xC7C7CC));
     lv_obj_set_style_text_align(fsart_artist, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(fsart_artist, LV_LABEL_LONG_DOT);
-    lv_obj_align(fsart_artist, LV_ALIGN_BOTTOM_MID, 0, -26);
+    lv_obj_align(fsart_artist, LV_ALIGN_TOP_MID, 0, 75);
     lv_obj_clear_flag(fsart_artist, LV_OBJ_FLAG_CLICKABLE);
 
     apply_accent();
     ui_set_np_style(cfg_get_int("np_style", 0));
 }
 
+static void np_shadow_sync(void){                                    /* keep the drop shadows' text in step */
+    if(!g_np_poster) return;
+    if(title_sh && strcmp(lv_label_get_text(title_sh), lv_label_get_text(title))) lv_label_set_text(title_sh, lv_label_get_text(title));
+    if(artist_sh && strcmp(lv_label_get_text(artist_sh), lv_label_get_text(artist))) lv_label_set_text(artist_sh, lv_label_get_text(artist));
+}
 void ui_update(const track_state_t *st)
 {
+    if(st) g_np_is_playing = (st->state == 2);        /* main.c normalises state before calling us */
+    np_shadow_sync();
+    if(vol_arc && g_np_poster && st && st->volume != imm_vol_last){ imm_vol_last = st->volume; lv_arc_set_value(vol_arc, st->volume); }
     char elapsed_buf[12];   /* room for H:MM:SS (audiobook-length) - mmss now emits hours */
     char remain_core[12];
     char remain_buf[14];    /* "-" + H:MM:SS */
@@ -1830,7 +2486,10 @@ void ui_update(const track_state_t *st)
         if(!mdb_is_book_path(st->path)) mdb_record_play(st->path);     /* but audiobooks are excluded from play history */
     }
 
-    set_label_text_changed(title, st->title[0] ? st->title : "Untitled");
+    { const char *nt = st->title[0] ? st->title : "Untitled";
+      int changed = strcmp(lv_label_get_text(title), nt) != 0;
+      set_label_text_changed(title, nt);
+      if(changed) ui_np_rescroll(); }                      /* a new track may scroll again */
     set_label_text_changed(artist, st->artist[0] ? st->artist : "");
     /* keep the full-screen art view fresh while it's open: text every update, image only on a
      * genuine track change (a PNG decode is too costly to do every position tick). */
@@ -1953,7 +2612,7 @@ static void vol_arc_cb(lv_event_t *e)
     lv_event_code_t code = lv_event_get_code(e);
     if(g_vol_suppress) return;                       /* programmatic update, ignore */
     int v = lv_arc_get_value(g_vol_arc);
-    char b[12]; snprintf(b, sizeof b, "%d/%d", v, VOL_MAX); lv_label_set_text(g_vol_num, b);
+    char b[12]; snprintf(b, sizeof b, "%d", v); lv_label_set_text(g_vol_num, b);
     if(code == LV_EVENT_VALUE_CHANGED){
         if(lv_tick_elaps(g_vol_last_send) >= 120){
             ui_set_volume(v); g_vol_last_send = lv_tick_get(); g_vol_pending = 0;
@@ -1967,47 +2626,79 @@ static void vol_arc_cb(lv_event_t *e)
         if(g_vol_pending){ ui_set_volume(v); g_vol_pending = 0; g_vol_last_send = lv_tick_get(); }
     }
 }
+static void vol_tap_close_cb(lv_event_t *e){ (void)e; if(g_vol_panel) lv_obj_add_flag(g_vol_panel, LV_OBJ_FLAG_HIDDEN); if(g_vol_timer) lv_timer_pause(g_vol_timer); }
 void ui_show_volume(int vol)
 {
     if(!g_vol_panel){
+        /* the rim arc: a level on the right rim filling bottom -> top in the current accent, rounded ends,
+         * a white handle, and the value at clock size in a badge beside it. The screen stays visible,
+         * lightly dimmed; only the arc and the number redraw while it's up. Drag the arc to set the level. */
         lv_obj_t *top = lv_layer_top();
-        /* translucent circular backdrop, centred */
         g_vol_panel = lv_obj_create(top);
         lv_obj_remove_style_all(g_vol_panel);
-        lv_obj_set_size(g_vol_panel, 200, 200);
-        lv_obj_center(g_vol_panel);
-        lv_obj_set_style_radius(g_vol_panel, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(g_vol_panel, lv_color_hex(0x000000), LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(g_vol_panel, 205, LV_PART_MAIN);
-        lv_obj_clear_flag(g_vol_panel, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_size(g_vol_panel, 360, 360);
+        lv_obj_set_style_bg_color(g_vol_panel, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_opa(g_vol_panel, 115, 0);
+        lv_obj_clear_flag(g_vol_panel, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);   /* taps pass through */
 
         g_vol_arc = lv_arc_create(g_vol_panel);
-        lv_obj_set_size(g_vol_arc, 184, 184);
+        lv_obj_set_size(g_vol_arc, 332, 332);
         lv_obj_center(g_vol_arc);
-        lv_arc_set_rotation(g_vol_arc, 135);
-        lv_arc_set_bg_angles(g_vol_arc, 0, 270);
+        lv_obj_add_flag(g_vol_arc, LV_OBJ_FLAG_ADV_HITTEST);     /* only the band itself is draggable */
+        lv_arc_set_rotation(g_vol_arc, 0);
+        lv_arc_set_bg_angles(g_vol_arc, 320, 40);                 /* the right rim */
+        lv_arc_set_mode(g_vol_arc, LV_ARC_MODE_REVERSE);          /* fills from the bottom end upward */
         lv_arc_set_range(g_vol_arc, 0, VOL_MAX);
-        lv_obj_set_style_arc_width(g_vol_arc, 10, LV_PART_MAIN);
-        lv_obj_set_style_arc_width(g_vol_arc, 10, LV_PART_INDICATOR);
-        lv_obj_set_style_arc_color(g_vol_arc, lv_color_hex(0x3A3A3C), LV_PART_MAIN);
-        lv_obj_set_style_arc_color(g_vol_arc, lv_color_hex(0xFFFFFF), LV_PART_INDICATOR);
+        lv_obj_set_style_arc_width(g_vol_arc, 12, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(g_vol_arc, 12, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_rounded(g_vol_arc, true, LV_PART_MAIN);
+        lv_obj_set_style_arc_rounded(g_vol_arc, true, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(g_vol_arc, lv_color_hex(0x46464A), LV_PART_MAIN);
+        lv_obj_set_style_arc_color(g_vol_arc, ui_current_accent(), LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(g_vol_arc, ui_current_accent(), LV_PART_KNOB);         /* white ring, accent dot */
+        lv_obj_set_style_bg_opa(g_vol_arc, LV_OPA_COVER, LV_PART_KNOB);
+        lv_obj_set_style_border_color(g_vol_arc, lv_color_hex(0xFFFFFF), LV_PART_KNOB);
+        lv_obj_set_style_border_width(g_vol_arc, 3, LV_PART_KNOB);
+        lv_obj_set_style_pad_all(g_vol_arc, 2, LV_PART_KNOB);
         lv_obj_add_event_cb(g_vol_arc, vol_arc_cb, LV_EVENT_VALUE_CHANGED, NULL);
         lv_obj_add_event_cb(g_vol_arc, vol_arc_cb, LV_EVENT_RELEASED, NULL);
         lv_obj_add_event_cb(g_vol_arc, vol_arc_cb, LV_EVENT_PRESS_LOST, NULL);
 
-        lv_obj_t *spk = lv_label_create(g_vol_panel);
+        lv_obj_t *badge = lv_obj_create(g_vol_panel);             /* speaker + value, clock-sized */
+        lv_obj_remove_style_all(badge);
+        lv_obj_set_size(badge, LV_SIZE_CONTENT, 60);
+        lv_obj_set_style_radius(badge, 30, 0);
+        lv_obj_set_style_bg_color(badge, lv_color_hex(0x141416), 0);
+        lv_obj_set_style_bg_opa(badge, LV_OPA_COVER, 0);
+        lv_obj_set_style_pad_hor(badge, 22, 0);
+        lv_obj_set_style_pad_column(badge, 10, 0);
+        lv_obj_set_flex_flow(badge, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(badge, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_clear_flag(badge, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_align(badge, LV_ALIGN_RIGHT_MID, -46, 0);
+        lv_obj_t *spk = lv_label_create(badge);
         lv_label_set_text(spk, LV_SYMBOL_VOLUME_MAX);
-        lv_obj_align(spk, LV_ALIGN_CENTER, 0, -22);
-        lv_obj_set_style_text_color(spk, lv_color_hex(0xC7C7CC), LV_PART_MAIN);
-
-        g_vol_num = lv_label_create(g_vol_panel);
-        lv_obj_align(g_vol_num, LV_ALIGN_CENTER, 0, 10);
-        lv_obj_set_style_text_font(g_vol_num, &lv_font_montserrat_28, LV_PART_MAIN);
-        lv_obj_set_style_text_color(g_vol_num, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+        lv_obj_set_style_text_font(spk, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(spk, ui_current_accent(), 0);
+        g_vol_num = lv_label_create(badge);
+        lv_obj_set_style_text_font(g_vol_num, &lv_font_montserrat_46, 0);
+        lv_obj_set_style_text_color(g_vol_num, lv_color_hex(0xFFFFFF), 0);
 
         g_vol_timer = lv_timer_create(vol_hide_cb, 1800, NULL);
         lv_timer_pause(g_vol_timer);
+        lv_obj_t *mid = lv_obj_create(g_vol_panel);               /* a tap in the middle closes it */
+        lv_obj_remove_style_all(mid);
+        lv_obj_set_size(mid, 220, 220);
+        lv_obj_center(mid);
+        lv_obj_set_style_radius(mid, LV_RADIUS_CIRCLE, 0);
+        lv_obj_add_flag(mid, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_ADV_HITTEST);
+        lv_obj_add_event_cb(mid, vol_tap_close_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_move_to_index(mid, 0);                             /* under the arc and the badge */
     }
+    { lv_color_t acc = ui_current_accent();                       /* follow an accent change */
+      lv_obj_set_style_arc_color(g_vol_arc, acc, LV_PART_INDICATOR);
+      lv_obj_set_style_bg_color(g_vol_arc, acc, LV_PART_KNOB);
+      lv_obj_set_style_text_color(lv_obj_get_child(lv_obj_get_parent(g_vol_num), 0), acc, 0); }
     if(vol < 0) vol = 0; if(vol > VOL_MAX) vol = VOL_MAX;
     /* Don't yank the arc out from under an active finger drag: while the arc is
      * pressed, vol_arc_cb already tracks the live value, and a lagging a714 echo
@@ -2016,7 +2707,7 @@ void ui_show_volume(int vol)
         g_vol_suppress = 1;
         lv_arc_set_value(g_vol_arc, vol);
         g_vol_suppress = 0;
-        char b[12]; snprintf(b, sizeof b, "%d/%d", vol, VOL_MAX); lv_label_set_text(g_vol_num, b);
+        char b[12]; snprintf(b, sizeof b, "%d", vol); lv_label_set_text(g_vol_num, b);
     }
     lv_obj_remove_flag(g_vol_panel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(g_vol_panel);

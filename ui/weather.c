@@ -3,6 +3,10 @@
 #include "screens.h"
 #include "config.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <math.h>
+#include "theme.h"
 #include <string.h>
 #include <stdint.h>
 #include <pthread.h>
@@ -110,6 +114,127 @@ static void *weather_thread(void *arg)
     return NULL;
 }
 
+
+/* ---- forecast (for the dial) ----------------------------------------------------------------------------
+ * wttr.in's JSON (?format=j1): the current condition, today's high/low, and 3-hourly slots for three days.
+ * Fetched only when the Weather screen opens (and at most every 10 min), in its own thread, so the passive
+ * home/saver weather costs nothing extra. Temperatures follow the units of the classic reading (C or F). */
+typedef struct { int day, hour, t, code; } fslot_t;
+typedef struct {
+    int ok, use_f, cur_t, cur_code, hi, lo, n;
+    char loc[48], cond[40];
+    fslot_t s[24];
+} fc_t;
+static pthread_mutex_t g_fc_mu = PTHREAD_MUTEX_INITIALIZER;
+static fc_t g_fc, g_fc_pub;
+static int g_fc_inflight, g_fc_ready, g_fc_have;
+static uint32_t g_fc_last;
+static char g_floc[160];
+
+/* the value of "key":"value" (or "key":number) inside obj[0..end) */
+static int jval(const char *obj, const char *end, const char *key, char *out, int cap){
+    char pat[40]; snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = obj;
+    size_t pl = strlen(pat);
+    for(;;){
+        p = memmem(p, (size_t)(end - p), pat, pl);
+        if(!p) return 0;
+        const char *q = p + pl; while(q < end && (*q == ' ' || *q == ':')) q++;
+        if(q >= end) return 0;
+        int n = 0;
+        if(*q == '"'){ q++; while(q < end && *q != '"' && n < cap - 1){ if(*q == '\\' && q + 1 < end) q++; out[n++] = *q++; } }
+        else { while(q < end && *q != ',' && *q != '}' && *q != ']' && n < cap - 1) out[n++] = *q++; }
+        out[n] = 0;
+        return n > 0;
+    }
+}
+static int jint(const char *obj, const char *end, const char *key, int *out){
+    char b[24]; if(!jval(obj, end, key, b, sizeof b)) return 0;
+    char *e; long v = strtol(b, &e, 10); if(e == b) return 0;
+    *out = (int)v; return 1;
+}
+/* the next top-level {...} at or after p (strings skipped); returns its start and sets *end past the closing brace */
+static const char *jnext_obj(const char *p, const char *lim, const char **end){
+    while(p < lim && *p != '{'){ if(*p == ']') return NULL; p++; }
+    if(p >= lim) return NULL;
+    int depth = 0, instr = 0; const char *q = p;
+    for(; q < lim; q++){
+        if(instr){ if(*q == '\\') q++; else if(*q == '"') instr = 0; continue; }
+        if(*q == '"') instr = 1;
+        else if(*q == '{') depth++;
+        else if(*q == '}'){ if(--depth == 0){ *end = q + 1; return p; } }
+    }
+    return NULL;
+}
+/* "key":[ ... ] : pointer just after the '[' , or NULL */
+static const char *jarray(const char *obj, const char *end, const char *key){
+    char pat[40]; snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = memmem(obj, (size_t)(end - obj), pat, strlen(pat));
+    if(!p) return NULL;
+    p += strlen(pat); while(p < end && *p != '[') p++;
+    return p < end ? p + 1 : NULL;
+}
+#ifndef WX_TEST
+static
+#endif
+int wx_parse_j1(const char *js, fc_t *o, int use_f){
+    memset(o, 0, sizeof *o); o->use_f = use_f;
+    const char *end = js + strlen(js);
+    const char *tk = use_f ? "temp_F" : "temp_C";
+    const char *cur = jarray(js, end, "current_condition"), *ce;
+    if(!cur || !(cur = jnext_obj(cur, end, &ce))) return 0;
+    if(!jint(cur, ce, tk, &o->cur_t)) return 0;
+    jint(cur, ce, "weatherCode", &o->cur_code);
+    const char *area = jarray(js, end, "nearest_area"), *ae;
+    if(area && (area = jnext_obj(area, end, &ae))){
+        const char *an = jarray(area, ae, "areaName"), *ne;
+        if(an && (an = jnext_obj(an, ae, &ne))) jval(an, ne, "value", o->loc, sizeof o->loc);
+    }
+    const char *days = jarray(js, end, "weather"), *de;
+    for(int d = 0; days && d < 3 && (days = jnext_obj(days, end, &de)); d++, days = de){
+        if(d == 0){ jint(days, de, use_f ? "maxtempF" : "maxtempC", &o->hi); jint(days, de, use_f ? "mintempF" : "mintempC", &o->lo); }
+        const char *hr = jarray(days, de, "hourly"), *he;
+        for(; hr && o->n < 24 && (hr = jnext_obj(hr, de, &he)); hr = he){
+            fslot_t *s = &o->s[o->n]; int tm = 0;
+            if(!jint(hr, he, "time", &tm) || !jint(hr, he, use_f ? "tempF" : "tempC", &s->t)) continue;
+            jint(hr, he, "weatherCode", &s->code);
+            s->day = d; s->hour = tm / 100; o->n++;
+        }
+    }
+    o->ok = o->n > 0;
+    return o->ok;
+}
+static void *forecast_thread(void *arg){
+    int use_f = (int)(intptr_t)arg;
+    char cmd[320];
+    snprintf(cmd, sizeof cmd, "wget -qO- -T 10 'http://wttr.in/%s?format=j1' 2>/dev/null", g_floc);
+    static char buf[48 * 1024]; size_t n = 0;                   /* one fetch at a time: g_fc_inflight */
+    FILE *f = popen(cmd, "r");
+    if(f){ size_t r; while(n < sizeof buf - 1 && (r = fread(buf + n, 1, sizeof buf - 1 - n, f)) > 0) n += r; pclose(f); }
+    buf[n] = 0;
+    fc_t fc; int ok = n > 0 && wx_parse_j1(buf, &fc, use_f);
+    pthread_mutex_lock(&g_fc_mu);
+    if(ok) g_fc_pub = fc;
+    g_fc_ready = ok ? 1 : 2; g_fc_inflight = 0;                 /* 1 = new data, 2 = failed */
+    pthread_mutex_unlock(&g_fc_mu);
+    return NULL;
+}
+static void forecast_fetch_async(void){
+    if(g_fc_have && lv_tick_elaps(g_fc_last) < 600000u) return;   /* fresh enough */
+    int go = 0;
+    pthread_mutex_lock(&g_fc_mu);
+    if(!g_fc_inflight){ g_fc_inflight = 1; g_fc_ready = 0; go = 1; }
+    pthread_mutex_unlock(&g_fc_mu);
+    if(!go) return;
+    wx_urlenc(cfg_get_str("weather_loc", ""), g_floc, sizeof g_floc);   /* main thread: cfg isn't thread-safe */
+    int use_f = 0;
+    pthread_mutex_lock(&g_wx_mu); use_f = strstr(g_wbuf, "\xC2\xB0" "F") != NULL; pthread_mutex_unlock(&g_wx_mu);
+    g_fc_last = lv_tick_get();
+    pthread_t th;
+    if(pthread_create(&th, NULL, forecast_thread, (void *)(intptr_t)use_f) == 0) pthread_detach(th);
+    else { pthread_mutex_lock(&g_fc_mu); g_fc_inflight = 0; g_fc_ready = 2; pthread_mutex_unlock(&g_fc_mu); }
+}
+
 void weather_fetch_async(void)
 {
     int go = 0;
@@ -148,6 +273,13 @@ void weather_set_enabled(int on)
 void weather_poll(lv_timer_t *t)
 {
     (void)t;
+    {   /* a finished forecast (only ever fetched while the Weather screen is open) */
+        int r = 0;
+        pthread_mutex_lock(&g_fc_mu);
+        if(g_fc_ready){ r = g_fc_ready; g_fc_ready = 0; if(r == 1){ g_fc = g_fc_pub; g_fc_have = 1; } }
+        pthread_mutex_unlock(&g_fc_mu);
+        if(r) weather_app_refresh();
+    }
     if (!cfg_get_int("weather_on", 1)) {
         /* weather off -> no fetch, no display. But DRAIN any in-flight worker result so a fetch that
          * completes while disabled can't flash a stale reading the instant it's re-enabled. */
@@ -180,31 +312,83 @@ void weather_poll(lv_timer_t *t)
 }
 
 /* ---- Weather app: set the location used for home + screensaver weather ---- */
-static lv_obj_t *g_app_w;    /* current weather text */
-static lv_obj_t *g_app_loc;  /* current location line */
+/* the dial: 8 forecast slots round the rim, the current weather in the middle */
+#define WD_SLOTS 8
+static lv_obj_t *g_wd_icon[WD_SLOTS], *g_wd_temp[WD_SLOTS], *g_wd_hour[WD_SLOTS];
+static lv_obj_t *g_wd_cicon, *g_wd_ctemp, *g_wd_cond, *g_wd_loc, *g_wd_hl, *g_wd_hint;
+void weather_app_open(void) { forecast_fetch_async(); weather_app_refresh(); screen_show(SCR_WEATHER); }
 
-static void weather_app_refresh(void)
-{
-    if (g_app_w) {
-        /* snapshot g_wbuf under the lock - the worker can be mid-write when the app screen
-         * refreshes, which would otherwise show torn text */
-        char snap[160]; int wfail;
-        pthread_mutex_lock(&g_wx_mu);
-        snprintf(snap, sizeof snap, "%s", g_wbuf);
-        wfail = g_wfail;   /* snapshot the guarded flag under the SAME lock (was an unlocked read) */
-        pthread_mutex_unlock(&g_wx_mu);
-        lv_label_set_text(g_app_w, g_have ? snap
-                                          : (wfail ? "Weather unavailable" : "Fetching..."));
-    }
-    if (g_app_loc) {
-        const char *l = cfg_get_str("weather_loc", "");
-        char b[128];
-        snprintf(b, sizeof b, "Location:  %s", (l && l[0]) ? l : "Auto (by IP)");
-        lv_label_set_text(g_app_loc, b);
+/* wttr.in weather codes -> our icon set (night clear = moon) */
+static const char *wd_icon(int code, int night){
+    switch(code){
+        case 113: return night ? WI_MOON : WI_SUN;
+        case 116: return night ? WI_MOON : WI_SUN;
+        case 200: case 386: case 389: case 392: case 395: return WI_BOLT;
+        case 179: case 182: case 185: case 227: case 230: case 317: case 320: case 323: case 326: case 329: case 332:
+        case 335: case 338: case 350: case 362: case 365: case 368: case 371: case 374: case 377: return WI_SNOW;
+        case 176: case 263: case 266: case 281: case 284: case 293: case 296: case 299: case 302: case 305: case 308:
+        case 311: case 314: case 353: case 356: case 359: return WI_RAIN;
+        default: return WI_CLOUD;                                  /* cloud, overcast, fog, mist */
     }
 }
-
-void weather_app_open(void) { weather_app_refresh(); screen_show(SCR_WEATHER); }
+static lv_color_t wd_col(const char *ic){
+    if(!strcmp(ic, WI_SUN) || !strcmp(ic, WI_BOLT)) return lv_color_hex(0xFFD60A);
+    if(!strcmp(ic, WI_MOON)) return lv_color_hex(0xA8B4E0);
+    if(!strcmp(ic, WI_RAIN)) return lv_color_hex(0x64B5F6);
+    return lv_color_hex(0xAEAEB2);
+}
+static void set_if(lv_obj_t *l, const char *t){ if(strcmp(lv_label_get_text(l), t)) lv_label_set_text(l, t); }
+static void weather_app_refresh(void)
+{
+    if(!g_wd_ctemp) return;
+    char snap[160]; int wfail;
+    pthread_mutex_lock(&g_wx_mu);                     /* the worker can be mid-write: snapshot under the lock */
+    snprintf(snap, sizeof snap, "%s", g_wbuf);
+    wfail = g_wfail;
+    pthread_mutex_unlock(&g_wx_mu);
+    fc_t fc; int have_fc, fc_state;
+    pthread_mutex_lock(&g_fc_mu); fc = g_fc; have_fc = g_fc_have; fc_state = g_fc_inflight; pthread_mutex_unlock(&g_fc_mu);
+    /* current: "<icon>  <temp>  <condition>" from the classic reading (the same one the home glance shows) */
+    char temp[32] = "--", cond[64] = "";
+    const char *icon = WI_CLOUD;
+    if(g_have){
+        char *sp = strstr(snap, "  ");
+        if(sp){
+            static char ic[8]; int il = (int)(sp - snap); if(il > 7) il = 7; memcpy(ic, snap, (size_t)il); ic[il] = 0;
+            if(!strncmp(ic, WI_SUN, 3)) icon = WI_SUN; else if(!strncmp(ic, WI_MOON, 3)) icon = WI_MOON; else if(!strncmp(ic, WI_RAIN, 3)) icon = WI_RAIN;
+            else if(!strncmp(ic, WI_BOLT, 3)) icon = WI_BOLT; else if(!strncmp(ic, WI_SNOW, 3)) icon = WI_SNOW;
+            char *t2 = sp + 2; char *sp2 = strstr(t2, "  ");
+            if(sp2){ int tl = (int)(sp2 - t2); if(tl > 31) tl = 31; memcpy(temp, t2, (size_t)tl); temp[tl] = 0; snprintf(cond, sizeof cond, "%.60s", sp2 + 2); }
+        }
+    }
+    lv_label_set_text(g_wd_cicon, g_have ? icon : "");
+    lv_obj_set_style_text_color(g_wd_cicon, wd_col(icon), 0);
+    set_if(g_wd_ctemp, g_have ? temp : (wfail ? "n/a" : "..."));
+    set_if(g_wd_cond, g_have ? cond : (wfail ? "Weather unavailable" : "Fetching..."));
+    const char *l = cfg_get_str("weather_loc", "");
+    char loc[64]; snprintf(loc, sizeof loc, "%.60s", (l && l[0]) ? l : (have_fc && fc.loc[0] ? fc.loc : "Auto (by IP)"));
+    set_if(g_wd_loc, loc);
+    char hl[40] = "";
+    if(have_fc && fc.ok) snprintf(hl, sizeof hl, "H %d\xC2\xB0  L %d\xC2\xB0", fc.hi, fc.lo);
+    set_if(g_wd_hl, hl);
+    /* the next eight 3-hourly slots after "now" (the device's clock) */
+    time_t now = time(NULL); struct tm lt; localtime_r(&now, &lt);
+    int now_abs = lt.tm_hour * 60 + lt.tm_min, first = -1;
+    if(have_fc && fc.ok){ for(int i = 0; i < fc.n; i++) if(fc.s[i].day * 1440 + fc.s[i].hour * 60 > now_abs){ first = i; break; } }
+    for(int k = 0; k < WD_SLOTS; k++){
+        int i = first >= 0 ? first + k : -1;
+        if(i < 0 || i >= fc.n){ set_if(g_wd_icon[k], ""); set_if(g_wd_temp[k], ""); set_if(g_wd_hour[k], ""); continue; }
+        int night = fc.s[i].hour >= 20 || fc.s[i].hour < 6;
+        const char *ic = wd_icon(fc.s[i].code, night);
+        set_if(g_wd_icon[k], ic); lv_obj_set_style_text_color(g_wd_icon[k], wd_col(ic), 0);
+        char b[16]; snprintf(b, sizeof b, "%d\xC2\xB0", fc.s[i].t); set_if(g_wd_temp[k], b);
+        snprintf(b, sizeof b, "%02d", fc.s[i].hour); set_if(g_wd_hour[k], b);
+    }
+    set_if(g_wd_hint, (have_fc && fc.ok) ? "tap the place to change it" : (fc_state ? "Loading forecast..." : "Forecast unavailable"));
+}
+#ifdef WX_TEST
+void wx_test_refresh(void){ weather_app_refresh(); }
+#endif
 
 static void loc_done(const char *text)
 {
@@ -230,48 +414,59 @@ static void auto_loc_cb(lv_event_t *e)
     weather_app_refresh();
 }
 
-static lv_obj_t *wapp_btn(lv_obj_t *root, int y, const char *label, lv_event_cb_t cb)
-{
-    lv_obj_t *b = lv_button_create(root);
-    lv_obj_remove_style_all(b);
-    lv_obj_set_pos(b, 50, y); lv_obj_set_size(b, 260, 52);
-    lv_obj_set_style_radius(b, 26, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x1C1C1E), 0);
-    lv_obj_set_style_bg_opa(b, LV_OPA_70, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x2C2C2E), LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
-    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *l = lv_label_create(b);
-    lv_label_set_text(l, label);
-    lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(l, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_center(l);
-    return b;
+static void loc_tap_cb(lv_event_t *e){
+    lv_event_code_t c = lv_event_get_code(e);
+    if(c == LV_EVENT_SHORT_CLICKED) set_loc_cb(e);                  /* tap the place: type a city */
+    else if(c == LV_EVENT_LONG_PRESSED){ auto_loc_cb(e); ui_toast("Location: automatic"); }   /* hold: by IP */
 }
-
+static lv_obj_t *wlabel(lv_obj_t *root, const lv_font_t *f, lv_color_t col){
+    lv_obj_t *l = lv_label_create(root);
+    lv_label_set_text(l, "");
+    lv_obj_set_style_text_font(l, f, 0); lv_obj_set_style_text_color(l, col, 0);
+    return l;
+}
 void weather_app_create(lv_obj_t *root)
 {
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
-
-    ui_header(root, "Weather");   /* shared standard header */
-
-    s_appwfont = lv_font_montserrat_22;
+    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    s_appwfont = lv_font_montserrat_14;                             /* text + the weather icons as fallback */
     s_appwfont.fallback = &font_weather16;
-    g_app_w = lv_label_create(root);
-    lv_obj_set_pos(g_app_w, 0, 96); lv_obj_set_width(g_app_w, 360);
-    lv_obj_set_style_text_align(g_app_w, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(g_app_w, &s_appwfont, 0);
-    lv_obj_set_style_text_color(g_app_w, lv_color_hex(0xFFFFFF), 0);
-
-    g_app_loc = lv_label_create(root);
-    lv_obj_set_pos(g_app_loc, 0, 140); lv_obj_set_width(g_app_loc, 360);
-    lv_obj_set_style_text_align(g_app_loc, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(g_app_loc, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(g_app_loc, lv_color_hex(0x8E8E93), 0);
-
-    wapp_btn(root, 186, "Set Location", set_loc_cb);
-    wapp_btn(root, 248, "Auto (by IP)", auto_loc_cb);
-
+    static lv_font_t s_bigwf; s_bigwf = lv_font_montserrat_28; s_bigwf.fallback = &font_weather16;
+    lv_obj_t *ring = lv_obj_create(root);                           /* the faint inner circle */
+    lv_obj_remove_style_all(ring);
+    lv_obj_set_size(ring, 200, 200); lv_obj_center(ring);
+    lv_obj_set_style_radius(ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(ring, 2, 0); lv_obj_set_style_border_color(ring, lv_color_hex(0x1E1E20), 0);
+    lv_obj_clear_flag(ring, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    for(int k = 0; k < WD_SLOTS; k++){
+        float a = (-90.0f + k * 45.0f) * 0.0174533f;
+        int cx = (int)lroundf(128 * cosf(a)), cy = (int)lroundf(128 * sinf(a));
+        g_wd_icon[k] = wlabel(root, &s_appwfont, lv_color_hex(TH_TXT2));
+        g_wd_temp[k] = wlabel(root, &lv_font_montserrat_14, lv_color_hex(TH_TXT1));
+        g_wd_hour[k] = wlabel(root, &lv_font_montserrat_10, lv_color_hex(TH_TXT3));
+        lv_obj_align(g_wd_icon[k], LV_ALIGN_CENTER, cx, cy - 10);
+        lv_obj_align(g_wd_temp[k], LV_ALIGN_CENTER, cx, cy + 9);
+        lv_obj_align(g_wd_hour[k], LV_ALIGN_CENTER, (int32_t)lroundf(160 * cosf(a)), (int32_t)lroundf(160 * sinf(a)));
+    }
+    g_wd_cicon = wlabel(root, &s_bigwf, lv_color_hex(TH_TXT2));
+    lv_obj_align(g_wd_cicon, LV_ALIGN_CENTER, 0, -58);
+    g_wd_ctemp = wlabel(root, &lv_font_montserrat_46, lv_color_hex(TH_TXT1));
+    lv_obj_align(g_wd_ctemp, LV_ALIGN_CENTER, 0, -8);
+    g_wd_cond = wlabel(root, ui_font_cjk(14), lv_color_hex(TH_TXT2));
+    lv_label_set_long_mode(g_wd_cond, LV_LABEL_LONG_DOT); lv_obj_set_width(g_wd_cond, 150);
+    lv_obj_set_style_text_align(g_wd_cond, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(g_wd_cond, LV_ALIGN_CENTER, 0, 26);
+    g_wd_loc = wlabel(root, ui_font_cjk(16), lv_color_hex(TH_TXT1));                 /* tap = change, hold = automatic */
+    lv_label_set_long_mode(g_wd_loc, LV_LABEL_LONG_DOT); lv_obj_set_width(g_wd_loc, 150);
+    lv_obj_set_style_text_align(g_wd_loc, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(g_wd_loc, LV_ALIGN_CENTER, 0, 46);
+    lv_obj_add_flag(g_wd_loc, LV_OBJ_FLAG_CLICKABLE); lv_obj_set_ext_click_area(g_wd_loc, 10);
+    lv_obj_add_event_cb(g_wd_loc, loc_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    lv_obj_add_event_cb(g_wd_loc, loc_tap_cb, LV_EVENT_LONG_PRESSED, NULL);
+    g_wd_hl = wlabel(root, &lv_font_montserrat_12, lv_color_hex(TH_TXT3));
+    lv_obj_align(g_wd_hl, LV_ALIGN_CENTER, 0, 64);
+    g_wd_hint = wlabel(root, &lv_font_montserrat_10, lv_color_hex(0x48484A));
+    lv_obj_align(g_wd_hint, LV_ALIGN_CENTER, 0, 80);
     weather_app_refresh();
 }

@@ -1,6 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "theme.h"
+#include "curvelist.h"
+#include <spawn.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include <unistd.h>
 #include "config.h"
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +31,9 @@
 #define WCLI "/usr/sbin/wpa_cli -i wlan0 "
 
 static lv_obj_t *g_sw, *g_list;
+static lv_obj_t *g_hring, *g_hglyph, *g_hname, *g_hsub;   /* the status ring + name + line at the top */
+static curvelist_t g_wcl;                                  /* curved network rows */
+static int g_cur_sig = -100;                               /* signal of the joined network (dBm), from the last scan */
 static lv_timer_t *g_scan_timer;
 static lv_timer_t *g_conn_timer;      /* non-NULL while a user connect is being polled */
 static uint32_t    g_wifi_last_start = 0;   /* last wifi_up.sh launch (shared: toggle + keepalive) */
@@ -45,16 +56,42 @@ static void scan_stop(void){
 /* ---- tiny local copies of settings.c's header helpers ------------------- */
 
 /* ---- shell helpers ------------------------------------------------------ */
-static int run_cap(const char *cmd, char *out, int cap){
+/* Run a shell command and capture its output, giving up after `ms`: wpa_cli blocks when wpa_supplicant is
+ * wedged, and an unbounded popen() here froze the UI. The child gets its own process group so a timeout kills
+ * the whole pipeline. */
+static int run_cap_to(const char *cmd, char *out, int cap, int ms){
     out[0] = 0;
-    FILE *p = popen(cmd, "r");
-    if(!p){ fprintf(stderr,"wifi run_cap popen failed: %s (%s)\n", cmd, strerror(errno)); return 0; }
-    int n = fread(out, 1, cap-1, p);
-    if(n < 0) n = 0;
+    int fd[2]; if(pipe(fd) != 0) return 0;
+    posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, fd[1], 1);
+    posix_spawn_file_actions_addclose(&fa, fd[0]);
+    posix_spawnattr_t at; posix_spawnattr_init(&at);
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETPGROUP); posix_spawnattr_setpgroup(&at, 0);
+    char *argv[] = { "sh", "-c", (char *)cmd, NULL };
+    extern char **environ;
+    pid_t pid; int rc = posix_spawn(&pid, "/bin/sh", &fa, &at, argv, environ);
+    posix_spawn_file_actions_destroy(&fa); posix_spawnattr_destroy(&at);
+    close(fd[1]);
+    if(rc != 0){ close(fd[0]); return 0; }
+    int n = 0, timed_out = 0; uint32_t t0 = lv_tick_get();
+    for(;;){
+        int left = ms - (int)lv_tick_elaps(t0);
+        if(left <= 0){ timed_out = 1; break; }
+        struct pollfd p = { .fd = fd[0], .events = POLLIN };
+        int pr = poll(&p, 1, left);
+        if(pr < 0){ if(errno == EINTR) continue; break; }
+        if(pr == 0){ timed_out = 1; break; }
+        ssize_t r = read(fd[0], out + n, (size_t)(cap - 1 - n));
+        if(r <= 0) break;
+        n += (int)r; if(n >= cap - 1) break;
+    }
+    close(fd[0]);
+    if(timed_out){ kill(-pid, SIGKILL); fprintf(stderr, "wifi: timed out after %d ms: %s\n", ms, cmd); }
+    waitpid(pid, NULL, 0);
     out[n] = 0;
-    pclose(p);
-    return n;
+    return timed_out ? 0 : n;
 }
+static int run_cap(const char *cmd, char *out, int cap){ return run_cap_to(cmd, out, cap, 4000); }
 
 static int wifi_status(char *ssid, int scap, char *ip, int icap){
     (void)scap; (void)icap;
@@ -157,6 +194,30 @@ void wifi_supervise(void){
 
 /* centred grey placeholder shown in the list area for non-network states */
 /* a single status message (Scanning / off / empty) - centered in the list area */
+/* ---- the status header: a ring showing the state (grey = off, a short spinning arc = turning on, a ring
+ * that fills with the signal strength once connected), the network name and a line under it ----------- */
+static void hring_spin_exec(void *var, int32_t v){ lv_arc_set_rotation((lv_obj_t *)var, v % 360); }
+enum { WS_OFF, WS_TURNING, WS_IDLE, WS_CONNECTED };
+static void hdr_set(int state, const char *name, const char *sub, int sig_dbm){
+    if(!g_hring) return;
+    lv_anim_delete(g_hring, hring_spin_exec);
+    lv_arc_set_rotation(g_hring, 270);
+    lv_color_t acc = ui_current_accent();
+    int v = 0;
+    if(state == WS_CONNECTED){ v = sig_dbm >= -45 ? 1000 : sig_dbm <= -90 ? 150 : 150 + (sig_dbm + 90) * 850 / 45; }   /* -90..-45 dBm -> 15..100% */
+    lv_arc_set_value(g_hring, state == WS_TURNING ? 260 : v);
+    lv_obj_set_style_arc_color(g_hring, acc, LV_PART_INDICATOR);
+    if(state == WS_TURNING){
+        lv_anim_t a; lv_anim_init(&a); lv_anim_set_var(&a, g_hring); lv_anim_set_exec_cb(&a, hring_spin_exec);
+        lv_anim_set_values(&a, 270, 270 + 360); lv_anim_set_duration(&a, 1000);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE); lv_anim_start(&a);
+    }
+    lv_obj_set_style_text_color(g_hglyph, lv_color_hex(state == WS_OFF ? TH_TXT3 : TH_TXT1), 0);
+    lv_label_set_text(g_hname, name ? name : "");
+    lv_obj_set_style_text_color(g_hname, lv_color_hex(state == WS_OFF ? TH_TXT2 : TH_TXT1), 0);
+    lv_label_set_text(g_hsub, sub ? sub : "");
+}
+
 static void list_msg(const char *m){
     if(!g_list) return;
     scan_stop();
@@ -468,12 +529,16 @@ void wifi_info_open(void){
 }
 
 /* ---- scan list ---------------------------------------------------------- */
-static void row_free_cb(lv_event_t *e){ free(lv_obj_get_user_data(lv_event_get_target(e))); }
+/* A row's data rides in its event callbacks, NOT in lv_obj user data: the curved-list helper keeps its own
+ * bookkeeping in every row's user data, which would overwrite it. */
+typedef struct { int flags; char ssid[64]; } netrow_t;
+static void row_free_cb(lv_event_t *e){ free(lv_event_get_user_data(e)); }
 static void net_cb(lv_event_t *e){
     if(lv_event_get_code(e)!=LV_EVENT_CLICKED) return;
-    lv_obj_t *row = lv_event_get_target(e);
-    const char *ssid = (const char*)lv_obj_get_user_data(row);
-    intptr_t flags = (intptr_t)lv_event_get_user_data(e);
+    const netrow_t *nr = lv_event_get_user_data(e);
+    if(!nr) return;
+    const char *ssid = nr->ssid;
+    intptr_t flags = nr->flags;
     int secured   = flags & 1;
     int connected = flags & 2;
     if(!ssid || !ssid[0]) return;
@@ -495,64 +560,66 @@ static void add_signal_bars(lv_obj_t *parent, int x, int y, int sig){
     for(int i=0;i<4;i++){
         lv_obj_t *b = lv_obj_create(parent);
         lv_obj_remove_style_all(b);
+        lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_size(b, 4, h[i]);
         lv_obj_set_pos(b, x + i*6, y + (17 - h[i]));
         lv_obj_set_style_radius(b, 1, 0);
         lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(b, lv_color_hex(i < bars ? 0xFFFFFF : 0x3A3A3C), 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(i < bars ? TH_TXT1 : 0x3A3A3C), 0);
     }
 }
 
+#define WROW_W 268
 static void add_net_row(const char *ssid, int signal, int secured, int connected){
     lv_obj_t *r = lv_button_create(g_list);
     lv_obj_remove_style_all(r);
-    lv_obj_set_size(r, 280, 46);
-    lv_obj_set_style_radius(r, 8, 0);
-    lv_obj_set_style_bg_color(r, lv_color_hex(connected ? 0x0A2A4A : 0x1C1C1E), 0);
-    lv_obj_set_style_bg_opa(r, connected ? LV_OPA_COVER : LV_OPA_50, 0);
-    lv_obj_set_style_bg_color(r, lv_color_hex(0x2C2C2E), LV_STATE_PRESSED);
+    lv_obj_set_size(r, WROW_W, 50);
+    lv_obj_add_flag(r, LV_OBJ_FLAG_USER_1);                 /* curves with the circle */
+    lv_obj_set_style_radius(r, TH_R_ROW, 0);
+    lv_obj_set_style_bg_color(r, lv_color_hex(connected ? TH_SURF2 : TH_SURF1), 0);
+    lv_obj_set_style_bg_opa(r, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(r, lv_color_hex(TH_SURF2), LV_STATE_PRESSED);
     lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
-    char *dup = strdup(ssid);
-    lv_obj_set_user_data(r, dup);
-    intptr_t flags = (secured?1:0) | (connected?2:0);
-    lv_obj_add_event_cb(r, net_cb, LV_EVENT_CLICKED, (void*)flags);
-    lv_obj_add_event_cb(r, row_free_cb, LV_EVENT_DELETE, NULL);
+    netrow_t *nr = malloc(sizeof *nr);
+    if(nr){ nr->flags = (secured?1:0) | (connected?2:0); snprintf(nr->ssid, sizeof nr->ssid, "%s", ssid); }
+    lv_obj_add_event_cb(r, net_cb, LV_EVENT_CLICKED, nr);
+    lv_obj_add_event_cb(r, row_free_cb, LV_EVENT_DELETE, nr);
 
-    int tx = 12;
+    int tx = 16;
     if(connected){
         lv_obj_t *ck = lv_label_create(r);
         lv_label_set_text(ck, LV_SYMBOL_OK);
-        lv_obj_set_pos(ck, 12, 15);
+        lv_obj_set_pos(ck, 14, 16);
         lv_obj_set_style_text_font(ck, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(ck, lv_color_hex(0x0A84FF), 0);
-        tx = 34;
+        lv_obj_set_style_text_color(ck, ui_current_accent(), 0);
+        tx = 38;
     }
     lv_obj_t *t = lv_label_create(r);
     lv_label_set_text(t, ssid);
     lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(t, tx, 13); lv_obj_set_size(t, 202 - tx, 20);
-    lv_obj_set_style_text_font(t, ui_font_cjk(16), 0);   /* SSIDs are user data: Cyrillic/CJK-capable (issue #3) */
-    lv_obj_set_style_text_color(t, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_pos(t, tx, 13); lv_obj_set_size(t, WROW_W - 78 - tx, 24);
+    lv_obj_set_style_text_font(t, ui_font_cjk(18), 0);       /* SSIDs are user data: Cyrillic/CJK-capable (issue #3) */
+    lv_obj_set_style_text_color(t, lv_color_hex(TH_TXT1), 0);
 
     if(secured){
         /* drawn padlock (no lock glyph exists in the fonts): a shackle loop with the body covering
          * its lower half, muted grey, in the clear lane left of the signal bars. */
-        lv_obj_t *shk = lv_obj_create(r);            /* shackle: border-only circle, lower half hidden by body */
+        lv_obj_t *shk = lv_obj_create(r);
         lv_obj_remove_style_all(shk);
-        lv_obj_clear_flag(shk, LV_OBJ_FLAG_CLICKABLE);   /* decorative: don't steal taps from the row */
-        lv_obj_set_size(shk, 8, 8); lv_obj_set_pos(shk, 229, 15);
+        lv_obj_clear_flag(shk, LV_OBJ_FLAG_CLICKABLE);       /* decorative: don't steal taps from the row */
+        lv_obj_set_size(shk, 8, 8); lv_obj_set_pos(shk, WROW_W - 70, 15);
         lv_obj_set_style_radius(shk, LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_border_width(shk, 2, 0);
-        lv_obj_set_style_border_color(shk, lv_color_hex(0x8E8E93), 0);
-        lv_obj_t *body = lv_obj_create(r);           /* body: rounded rect */
+        lv_obj_set_style_border_color(shk, lv_color_hex(TH_TXT3), 0);
+        lv_obj_t *body = lv_obj_create(r);
         lv_obj_remove_style_all(body);
         lv_obj_clear_flag(body, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_size(body, 10, 8); lv_obj_set_pos(body, 228, 20);
+        lv_obj_set_size(body, 10, 8); lv_obj_set_pos(body, WROW_W - 71, 20);
         lv_obj_set_style_radius(body, 2, 0);
-        lv_obj_set_style_bg_color(body, lv_color_hex(0x8E8E93), 0);
+        lv_obj_set_style_bg_color(body, lv_color_hex(TH_TXT3), 0);
         lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
     }
-    add_signal_bars(r, 244, 14, signal);
+    add_signal_bars(r, WROW_W - 48, 16, signal);
 }
 
 /* parse `wpa_cli scan_results`: bssid \t freq \t signal \t flags \t ssid */
@@ -564,6 +631,7 @@ static void scan_fill(void){
     char cs[64], cip[32];
     if(!(wifi_radio_on() && wifi_status(cs, sizeof cs, cip, sizeof cip))) cs[0]=0;
     snprintf(g_cur_ssid, sizeof g_cur_ssid, "%s", cs);
+    g_cur_sig = -100;
 
     char buf[8192];
     run_cap(WCLI "scan_results 2>/dev/null", buf, sizeof buf);
@@ -586,6 +654,7 @@ static void scan_fill(void){
                 snprintf(seen[nseen++], 64, "%s", ssid);
                 int secured = (strstr(flags, "WPA") || strstr(flags, "PSK") || strstr(flags, "WEP")) != 0;
                 int connected = (g_cur_ssid[0] && !strcmp(ssid, g_cur_ssid));
+                if(connected) g_cur_sig = sig;
                 add_net_row(ssid, sig, secured, connected);
             }
         }
@@ -593,6 +662,9 @@ static void scan_fill(void){
         l = nl + 1;
     }
     if(nseen == 0) list_msg("No networks found");
+    else { lv_obj_update_layout(g_list); curvelist_update(&g_wcl); }
+    if(cs[0]){ char sub[64]; snprintf(sub, sizeof sub, "Connected%s%s", cip[0] ? " \xC2\xB7 " : "", cip); hdr_set(WS_CONNECTED, cs, sub, g_cur_sig); }
+    else hdr_set(WS_IDLE, "Not connected", "Tap a network", 0);
 }
 
 static void scan_timer_cb(lv_timer_t *t){
@@ -601,7 +673,7 @@ static void scan_timer_cb(lv_timer_t *t){
     if(g_scan_timer){ lv_timer_del(g_scan_timer); g_scan_timer = NULL; }
 }
 static void start_scan(void){
-    if(!wifi_radio_on()){ list_msg("Wi-Fi is off"); return; }
+    if(!wifi_radio_on()){ list_msg("Switch it on to see networks"); hdr_set(WS_OFF, "Wi-Fi is off", "", 0); return; }
     /* wpa_cli returns non-zero when it can't reach the control socket / issue the scan; surface
      * that honestly instead of letting scan_fill() report a false "No networks found". */
     if(system(WCLI "scan >/dev/null 2>&1") != 0){ list_msg("Couldn't scan Wi-Fi"); return; }
@@ -626,7 +698,7 @@ static void radio_on_poll_cb(lv_timer_t *t){
     }
     if(lv_tick_elaps(g_radio_start) > 8000){
         lv_timer_del(g_radio_timer); g_radio_timer = NULL;
-        list_msg("Couldn't turn on Wi-Fi");
+        list_msg("Couldn't turn on Wi-Fi"); hdr_set(WS_OFF, "Wi-Fi is off", "Couldn't turn it on", 0);
     }
 }
 static void sw_cb(lv_event_t *e){
@@ -637,7 +709,7 @@ static void sw_cb(lv_event_t *e){
         system("/usr/bin/wifi_up.sh >/dev/null 2>&1 &");
         g_wifi_last_start = lv_tick_get();       /* let the keepalive back off (no duplicate launch) */
         g_sanitize_pending = 1;                  /* sanitize this instance once it's up */
-        list_msg("Turning on Wi-Fi...");
+        list_msg("Please wait..."); hdr_set(WS_TURNING, "Turning on...", "", 0);
         g_radio_start = lv_tick_get();
         if(g_radio_timer) lv_timer_del(g_radio_timer);
         g_radio_timer = lv_timer_create(radio_on_poll_cb, 700, NULL);
@@ -647,7 +719,7 @@ static void sw_cb(lv_event_t *e){
         if(g_scan_timer){ lv_timer_del(g_scan_timer); g_scan_timer = NULL; }  /* cancel a pending scan, else scan_fill overwrites "Wi-Fi is off" with stale networks */
         if(g_conn_timer){ lv_timer_del(g_conn_timer); g_conn_timer = NULL; }  /* cancel a pending connect poll, else it toasts/scans stale after off */
         system("/usr/bin/wifi_down.sh >/dev/null 2>&1");
-        list_msg("Wi-Fi is off");
+        list_msg("Switch it on to see networks"); hdr_set(WS_OFF, "Wi-Fi is off", "", 0);
     }
 }
 
@@ -666,76 +738,94 @@ int wifi_toggle(void){
         if(g_conn_timer){ lv_timer_del(g_conn_timer); g_conn_timer = NULL; }  /* + the connect poll */
         system("/usr/bin/wifi_down.sh >/dev/null 2>&1");
     }
+    if(g_hring){ if(on) hdr_set(WS_TURNING, "Turning on...", "", 0); else hdr_set(WS_OFF, "Wi-Fi is off", "", 0); }
     /* keep the Wi-Fi screen's switch in sync so it reflects reality when opened later */
     if(g_sw){ if(on) lv_obj_add_state(g_sw, LV_STATE_CHECKED); else lv_obj_clear_state(g_sw, LV_STATE_CHECKED); }
     return on;
 }
 
 static void rescan_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED) start_scan(); }
-static void back_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED) screen_back(); }
+__attribute__((unused)) static void back_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED) screen_back(); }
 
 void wifi_create(lv_obj_t *root){
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
-    ui_header_cb(root, "Wi-Fi", back_cb);   /* shared header */
+    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* control row: pill with [label + switch]; scan button OUTSIDE, to the
-     * right of the switch (still inside the round screen). */
-    lv_obj_t *trow = lv_obj_create(root);
-    lv_obj_remove_style_all(trow);
-    lv_obj_set_pos(trow, 50, 64); lv_obj_set_size(trow, 208, 48);
-    lv_obj_set_style_radius(trow, 12, 0);
-    lv_obj_set_style_bg_color(trow, lv_color_hex(0x1C1C1E), 0);
-    lv_obj_set_style_bg_opa(trow, LV_OPA_70, 0);
-    lv_obj_clear_flag(trow, LV_OBJ_FLAG_SCROLLABLE);
+    /* the status ring (centre), the switch on its right and the rescan button on its left */
+    g_hring = lv_arc_create(root);
+    lv_obj_remove_style(g_hring, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(g_hring, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(g_hring, 84, 84); lv_obj_align(g_hring, LV_ALIGN_TOP_MID, 0, 34);
+    lv_arc_set_rotation(g_hring, 270); lv_arc_set_bg_angles(g_hring, 0, 360); lv_arc_set_range(g_hring, 0, 1000); lv_arc_set_value(g_hring, 0);
+    lv_obj_set_style_arc_width(g_hring, 4, LV_PART_MAIN); lv_obj_set_style_arc_color(g_hring, lv_color_hex(TH_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(g_hring, 4, LV_PART_INDICATOR); lv_obj_set_style_arc_rounded(g_hring, true, LV_PART_INDICATOR);
+    g_hglyph = lv_label_create(root);
+    lv_label_set_text(g_hglyph, LV_SYMBOL_WIFI);
+    lv_obj_set_style_text_font(g_hglyph, &lv_font_montserrat_28, 0);
+    lv_obj_align(g_hglyph, LV_ALIGN_TOP_MID, 0, 62);
+    g_hname = lv_label_create(root);
+    lv_label_set_long_mode(g_hname, LV_LABEL_LONG_DOT); lv_obj_set_width(g_hname, 230);
+    lv_obj_set_style_text_align(g_hname, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(g_hname, ui_font_cjk(18), 0);
+    lv_obj_align(g_hname, LV_ALIGN_TOP_MID, 0, 128);
+    g_hsub = lv_label_create(root);
+    lv_label_set_long_mode(g_hsub, LV_LABEL_LONG_DOT); lv_obj_set_width(g_hsub, 230);
+    lv_obj_set_style_text_align(g_hsub, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(g_hsub, ui_font_cjk(14), 0); lv_obj_set_style_text_color(g_hsub, lv_color_hex(TH_TXT2), 0);   /* has the middle dot */
+    lv_obj_align(g_hsub, LV_ALIGN_TOP_MID, 0, 152);
 
-    lv_obj_t *tl = lv_label_create(trow);
-    lv_label_set_text(tl, "Wi-Fi");
-    lv_obj_set_pos(tl, 16, 14);
-    lv_obj_set_style_text_font(tl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(tl, lv_color_hex(0xFFFFFF), 0);
-
-    g_sw = lv_switch_create(trow);
+    g_sw = lv_switch_create(root);
     lv_obj_set_size(g_sw, 46, 24);
-    lv_obj_set_ext_click_area(g_sw, 10);
-    lv_obj_align(g_sw, LV_ALIGN_RIGHT_MID, -14, 0);
+    lv_obj_set_ext_click_area(g_sw, 12);
+    lv_obj_align(g_sw, LV_ALIGN_TOP_MID, 106, 64);
+    lv_obj_set_style_bg_color(g_sw, lv_color_hex(TH_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(g_sw, ui_current_accent(), (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_add_event_cb(g_sw, sw_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *rb = lv_button_create(root);
     lv_obj_remove_style_all(rb);
-    lv_obj_set_pos(rb, 266, 72); lv_obj_set_size(rb, 36, 32);
+    lv_obj_set_size(rb, 34, 34); lv_obj_align(rb, LV_ALIGN_TOP_MID, -106, 59);
     lv_obj_set_ext_click_area(rb, 8);
-    lv_obj_set_style_radius(rb, 10, 0);
-    lv_obj_set_style_bg_color(rb, lv_color_hex(0x1C1C1E), 0);
-    lv_obj_set_style_bg_opa(rb, LV_OPA_70, 0);
-    lv_obj_set_style_bg_color(rb, lv_color_hex(0x2C2C2E), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(rb, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(rb, lv_color_hex(TH_SURF1), 0);
+    lv_obj_set_style_bg_opa(rb, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(rb, lv_color_hex(TH_SURF2), LV_STATE_PRESSED);
     lv_obj_add_event_cb(rb, rescan_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *rl = lv_label_create(rb);
     lv_label_set_text(rl, LV_SYMBOL_REFRESH);
-    lv_obj_set_style_text_font(rl, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(rl, lv_color_hex(0xC7C7CC), 0);
+    lv_obj_set_style_text_font(rl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(rl, lv_color_hex(TH_TXT2), 0);
     lv_obj_center(rl);
 
-    /* network list (carries connected/off/scanning state itself) */
+    /* network list (carries connected/off/scanning state itself), curved with the circle */
     g_list = lv_obj_create(root);
     lv_obj_remove_style_all(g_list);
-    lv_obj_set_pos(g_list, 40, 126); lv_obj_set_size(g_list, 280, 192);
-    lv_obj_set_style_pad_bottom(g_list, 44, 0);   /* last row scrolls clear of the round bottom bezel */
+    lv_obj_set_pos(g_list, (360 - WROW_W) / 2, 182); lv_obj_set_size(g_list, WROW_W, 170);
+    lv_obj_set_style_pad_bottom(g_list, 30, 0);
     lv_obj_set_style_bg_opa(g_list, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_row(g_list, 6, 0);
+    lv_obj_set_style_pad_row(g_list, 4, 0);
     lv_obj_set_flex_flow(g_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(g_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scroll_dir(g_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(g_list, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(g_list, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    curvelist_attach(&g_wcl, g_list, root, WROW_W);
+    hdr_set(WS_OFF, "Wi-Fi", "", 0);
 }
 
 /* called from settings when the Wi-Fi row is tapped */
 void wifi_open(void){
+    if(g_sw) lv_obj_set_style_bg_color(g_sw, ui_current_accent(), (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_CHECKED);   /* follow an accent change */
     if(g_sw){
         if(wifi_radio_on()) lv_obj_add_state(g_sw, LV_STATE_CHECKED);
         else                lv_obj_clear_state(g_sw, LV_STATE_CHECKED);
     }
     screen_show(SCR_WIFI);
+    if(wifi_radio_on()){
+        char cs[64], cip[32];
+        if(wifi_status(cs, sizeof cs, cip, sizeof cip) && cs[0]){ char sub[64]; snprintf(sub, sizeof sub, "Connected%s%s", cip[0] ? " \xC2\xB7 " : "", cip); hdr_set(WS_CONNECTED, cs, sub, g_cur_sig); }
+        else hdr_set(WS_IDLE, "Not connected", "", 0);
+    } else hdr_set(WS_OFF, "Wi-Fi is off", "", 0);
     start_scan();
 }

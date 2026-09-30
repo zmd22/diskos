@@ -7,6 +7,9 @@
 #include "screens.h"
 #include "musicdb.h"
 #include "artcache.h"
+#include "theme.h"
+#include "curvelist.h"
+#include <math.h>
 #include "scanner.h"   /* scan_read_chapters for the chapter-navigation screen */
 #include "ipc.h"       /* ipc_get_state: current book + position for the chapter list */
 
@@ -16,8 +19,10 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <time.h>
+#include <stdlib.h>
 
 static lv_obj_t *g_list;
+static curvelist_t g_bcl;                    /* rows curve with the circle, position dots on the rim */
 #define BOOKS_MAX 256
 static book_t g_books[BOOKS_MAX];
 static int    g_nbooks;
@@ -46,7 +51,21 @@ static void books_covers_cleanup(void){
 }
 
 /* Human progress line: "Finished", "Not started", "3h 12m in" / "7m in". */
-static void progress_text(const book_t *b, char *out, size_t len){
+/* "9 h 51 m left" / "Finished" / "Not started" (needs the length; falls back to time in when unknown) */
+static void left_text(const book_t *b, char *out, size_t len){
+    if(b->completed){ snprintf(out, len, "Finished"); return; }
+    if(b->duration_ms > 0){
+        long pos = b->position_ms < 0 ? 0 : b->position_ms; if(pos > b->duration_ms) pos = b->duration_ms;
+        long rem = (b->duration_ms - pos) / 1000, h = rem / 3600, m = (rem / 60) % 60;
+        if(pos <= 0){ snprintf(out, len, "%ld h %02ld m", h, m); return; }
+        if(h > 0) snprintf(out, len, "%ld h %02ld m left", h, m); else snprintf(out, len, "%ld m left", m > 0 ? m : 1);
+        return;
+    }
+    if(b->position_ms <= 0){ snprintf(out, len, "Not started"); return; }
+    long s2 = b->position_ms / 1000, h = s2 / 3600, m = (s2 / 60) % 60;
+    if(h > 0) snprintf(out, len, "%ldh %ldm in", h, m); else snprintf(out, len, "%ldm in", m > 0 ? m : 1);
+}
+__attribute__((unused)) static void progress_text(const book_t *b, char *out, size_t len){
     if(b->completed){ snprintf(out, len, "Finished"); return; }
     if(b->position_ms <= 0){ snprintf(out, len, "Not started"); return; }
     long s = b->position_ms / 1000, h = s / 3600, m = (s / 60) % 60;
@@ -78,10 +97,21 @@ static void book_row_cb(lv_event_t *e){
  * has art in the cache), otherwise a music glyph on the accent tile. Books that have never
  * been opened have no cached art yet - they show the glyph until first play. */
 static void books_add_cover(lv_obj_t *row, const book_t *b, int i){
+    /* the progress ring: how far through the book (a full green ring once finished) */
+    int frac = b->completed ? 1000 : (b->duration_ms > 0 ? (int)((long long)(b->position_ms < 0 ? 0 : b->position_ms) * 1000 / b->duration_ms) : 0);
+    if(frac > 1000) frac = 1000;
+    lv_obj_t *ring = lv_arc_create(row);
+    lv_obj_remove_style(ring, NULL, LV_PART_KNOB);
+    lv_obj_clear_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(ring, 52, 52); lv_obj_set_pos(ring, 8, 6);
+    lv_arc_set_rotation(ring, 270); lv_arc_set_bg_angles(ring, 0, 360); lv_arc_set_range(ring, 0, 1000); lv_arc_set_value(ring, frac);
+    lv_obj_set_style_arc_width(ring, 3, LV_PART_MAIN); lv_obj_set_style_arc_color(ring, lv_color_hex(TH_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(ring, 3, LV_PART_INDICATOR); lv_obj_set_style_arc_rounded(ring, true, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(ring, b->completed ? lv_color_hex(0x34C759) : ui_current_accent(), LV_PART_INDICATOR);
     lv_obj_t *tile = lv_obj_create(row);
     lv_obj_remove_style_all(tile);
-    lv_obj_set_pos(tile, 12, 8); lv_obj_set_size(tile, 42, 42);
-    lv_obj_set_style_radius(tile, 8, 0);
+    lv_obj_set_pos(tile, 13, 11); lv_obj_set_size(tile, 42, 42);
+    lv_obj_set_style_radius(tile, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_clip_corner(tile, true, 0);
     lv_obj_set_style_bg_color(tile, lv_color_hex(0x3A3A3C), 0);
     lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
@@ -141,34 +171,39 @@ static void books_rebuild(void){
         book_t *b = &g_books[i];
         lv_obj_t *r = lv_button_create(g_list);
         lv_obj_remove_style_all(r);
-        lv_obj_set_size(r, 288, 58);
-        lv_obj_set_style_radius(r, 10, 0);
-        lv_obj_set_style_bg_color(r, lv_color_hex(0x1C1C1E), 0);
-        lv_obj_set_style_bg_opa(r, LV_OPA_50, 0);
-        lv_obj_set_style_bg_color(r, lv_color_hex(0x2C2C2E), LV_STATE_PRESSED);
+        lv_obj_set_size(r, 268, 66);
+        lv_obj_add_flag(r, LV_OBJ_FLAG_USER_1);                 /* curves with the circle */
+        lv_obj_set_style_radius(r, TH_R_ROW, 0);
+        lv_obj_set_style_bg_color(r, lv_color_hex(TH_SURF1), 0);
+        lv_obj_set_style_bg_opa(r, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(r, lv_color_hex(TH_SURF2), LV_STATE_PRESSED);
         lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_event_cb(r, book_row_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
-        books_add_cover(r, b, i);                               /* 42px cover / glyph on the left */
+        books_add_cover(r, b, i);                               /* the cover in its progress ring */
 
         lv_obj_t *t = lv_label_create(r);                       /* title (book names may be non-Latin) */
         lv_label_set_text(t, b->title[0] ? b->title : "Untitled");
         lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(t, 64, 8); lv_obj_set_size(t, 210, 20);
+        lv_obj_set_pos(t, 70, 6); lv_obj_set_size(t, 186, 22);
         lv_obj_set_style_text_font(t, ui_font_cjk(16), 0);
-        lv_obj_set_style_text_color(t, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_color(t, lv_color_hex(TH_TXT1), 0);
 
-        char prog[32]; progress_text(b, prog, sizeof prog);
-        char sub[224];
-        if(b->author[0]) snprintf(sub, sizeof sub, "%s - %s", b->author, prog);
-        else             snprintf(sub, sizeof sub, "%s", prog);
-        lv_obj_t *s = lv_label_create(r);                       /* author - progress */
-        lv_label_set_text(s, sub);
-        lv_label_set_long_mode(s, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(s, 64, 32); lv_obj_set_size(s, 210, 18);
-        lv_obj_set_style_text_font(s, ui_font_cjk(14), 0);
-        lv_obj_set_style_text_color(s, lv_color_hex(0x8E8E93), 0);
+        lv_obj_t *au = lv_label_create(r);                      /* author */
+        lv_label_set_text(au, b->author[0] ? b->author : " ");
+        lv_label_set_long_mode(au, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(au, 70, 26); lv_obj_set_size(au, 186, 18);
+        lv_obj_set_style_text_font(au, ui_font_cjk(14), 0);
+        lv_obj_set_style_text_color(au, lv_color_hex(TH_TXT2), 0);
+
+        char left[40]; left_text(b, left, sizeof left);
+        lv_obj_t *lf = lv_label_create(r);                      /* time left: accent, green when finished */
+        lv_label_set_text(lf, left);
+        lv_obj_set_pos(lf, 70, 46);
+        lv_obj_set_style_text_font(lf, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lf, b->completed ? lv_color_hex(0x34C759) : (b->position_ms > 0 ? ui_current_accent() : lv_color_hex(TH_TXT3)), 0);
     }
+    lv_obj_update_layout(g_list); curvelist_update(&g_bcl);
     lv_obj_scroll_to_y(g_list, 0, LV_ANIM_OFF);
 }
 
@@ -179,15 +214,16 @@ void books_create(lv_obj_t *root){
 
     g_list = lv_obj_create(root);
     lv_obj_remove_style_all(g_list);
-    lv_obj_set_pos(g_list, 30, 72); lv_obj_set_size(g_list, 300, 272);
-    lv_obj_set_style_pad_bottom(g_list, 44, 0);   /* last row clears the round bottom bezel */
+    lv_obj_set_pos(g_list, 46, 72); lv_obj_set_size(g_list, 268, 276);
+    lv_obj_set_style_pad_bottom(g_list, 30, 0);   /* last row clears the round bottom bezel */
     lv_obj_set_style_bg_opa(g_list, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(g_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(g_list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(g_list, 6, 0);
+    lv_obj_set_style_pad_row(g_list, 4, 0);
     lv_obj_set_scroll_dir(g_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(g_list, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(g_list, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    curvelist_attach(&g_bcl, g_list, root, 268);
 }
 
 void books_open(void){
@@ -198,7 +234,8 @@ void books_open(void){
 /* ---- Chapter navigation (SCR_CHAPTERS): reached from the Now Playing right-hub for an audiobook.
  * Lists the current book's chapters; tapping one seeks to its start and returns to Now Playing. */
 #define CHAPS_MAX 256
-static lv_obj_t *g_chap_list;
+static lv_obj_t *g_chap_list;                /* the full list, inside the List overlay */
+static lv_obj_t *g_chap_ov;
 static chapter_t g_chlist[CHAPS_MAX];
 static int       g_chlist_n;
 static char      g_chlist_path[512];   /* the book these chapters belong to (a jump must target THAT book) */
@@ -268,7 +305,7 @@ static void chapters_rebuild(void){
         lv_label_set_text(num, nb);
         lv_obj_set_pos(num, 12, 16); lv_obj_set_size(num, 34, 20);
         lv_obj_set_style_text_font(num, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(num, lv_color_hex(i == cur ? 0x0A84FF : 0x8E8E93), 0);
+        lv_obj_set_style_text_color(num, lv_color_hex(i == cur ? UI_RED : 0x8E8E93), 0);
 
         lv_obj_t *t = lv_label_create(r);                       /* chapter title (may be non-Latin) */
         lv_label_set_text(t, g_chlist[i].title);
@@ -288,15 +325,175 @@ static void chapters_rebuild(void){
     }
     if(cur_row) lv_obj_scroll_to_view(cur_row, LV_ANIM_OFF);    /* open centred on the current chapter */
 }
+static void chapters_paint(void);
 
+/* ---- the ring ---------------------------------------------------------------------------------------
+ * One segment per chapter round the rim: heard = light grey, the current one = accent, the rest dark. Tap
+ * a segment to jump to that chapter. Books with more than 40 chapters get a continuous progress ring instead
+ * (segments would be too thin to hit); the previous / next buttons and the full list work for every book. */
+#define CH_R 146
+#define CH_W 12
+#define CH_SEG_MAX 40
+static lv_obj_t *g_ch_canvas, *g_ch_hit, *g_ch_cover, *g_ch_cimg, *g_ch_cnote, *g_ch_num, *g_ch_title, *g_ch_time, *g_ch_prev, *g_ch_next, *g_ch_list_btn;
+static uint8_t *g_ch_buf;
+static int g_ch_cur = -1;
+static long g_ch_pos, g_ch_dur;
+static lv_timer_t *g_ch_tmr;
+
+static int chap_current(long pos){ int c = 0; for(int i = 0; i < g_chlist_n; i++){ if(g_chlist[i].start_ms <= pos) c = i; else break; } return c; }
+static void fmt_clock(long ms, char *o, size_t n){
+    if(ms < 0) ms = 0;
+    long t = ms / 1000, h = t / 3600, m = (t / 60) % 60, sec = t % 60;
+    if(h > 0) snprintf(o, n, "%ld:%02ld:%02ld", h, m, sec); else snprintf(o, n, "%ld:%02ld", m, sec);
+}
+static void chap_jump(int i){                                    /* seek to chapter i (same guard as the list) */
+    if(i < 0 || i >= g_chlist_n) return;
+    track_state_t st; ipc_get_state(&st);
+    if(!st.path[0] || strcmp(st.path, g_chlist_path) != 0){ screen_show(SCR_NOWPLAYING); return; }
+    long tgt = g_chlist[i].start_ms;
+    if(st.duration_ms > 0 && tgt >= st.duration_ms) tgt = st.duration_ms - 1;
+    if(tgt < 0) tgt = 0;
+    if(ui_seek_to(tgt) == 0) ui_book_user_seeked(tgt);
+    screen_show(SCR_NOWPLAYING);
+}
+static void ch_arc(lv_layer_t *L, int r, int w, float a0, float a1, lv_color_t c){
+    lv_draw_arc_dsc_t d; lv_draw_arc_dsc_init(&d);
+    d.center.x = 180; d.center.y = 180; d.radius = (uint16_t)r; d.width = (uint16_t)w;
+    while(a0 < 0){ a0 += 360; a1 += 360; }
+    d.start_angle = (lv_value_precise_t)a0; d.end_angle = (lv_value_precise_t)a1; d.color = c; d.opa = LV_OPA_COVER;
+    lv_draw_arc(L, &d);
+}
+static void chapters_paint(void){
+    if(!g_ch_canvas) return;
+    track_state_t st; ipc_get_state(&st);
+    g_ch_pos = st.position_ms; g_ch_dur = st.duration_ms;
+    int n = g_chlist_n, cur = n > 0 ? chap_current(g_ch_pos) : -1;
+    lv_canvas_fill_bg(g_ch_canvas, lv_color_hex(TH_BG), LV_OPA_COVER);
+    lv_layer_t L; lv_canvas_init_layer(g_ch_canvas, &L);
+    lv_color_t track = lv_color_hex(TH_TRACK), heard = lv_color_hex(0x6E6E74), acc = ui_current_accent();
+    if(n >= 1 && n <= CH_SEG_MAX){
+        float step = 360.0f / n, gap = n > 1 ? 2.4f : 0.0f;
+        for(int i = 0; i < n; i++){
+            float a0 = -90.0f + i * step + gap / 2, a1 = -90.0f + (i + 1) * step - gap / 2;
+            ch_arc(&L, CH_R, CH_W, a0, a1, i == cur ? acc : (i < cur ? heard : track));
+        }
+    } else if(n > CH_SEG_MAX){
+        ch_arc(&L, CH_R, CH_W, -90.0f, 270.0f, track);
+        if(g_ch_dur > 0 && g_ch_pos > 0){ float f = (float)g_ch_pos / (float)g_ch_dur; if(f > 1) f = 1; ch_arc(&L, CH_R, CH_W, -90.0f, -90.0f + 360.0f * f - 0.01f, acc); }
+    }
+    lv_canvas_finish_layer(g_ch_canvas, &L);
+    char b[96];
+    if(n <= 0){
+        lv_label_set_text(g_ch_num, g_chlist_path[0] ? "No chapters" : "No audiobook playing");
+        lv_label_set_text(g_ch_title, ""); lv_label_set_text(g_ch_time, "");
+    } else {
+        snprintf(b, sizeof b, "Chapter %d of %d", cur + 1, n); lv_label_set_text(g_ch_num, b);
+        lv_label_set_text(g_ch_title, g_chlist[cur].title[0] ? g_chlist[cur].title : "-");
+        long endms = (cur + 1 < n) ? g_chlist[cur + 1].start_ms : (g_ch_dur > 0 ? g_ch_dur : g_chlist[cur].start_ms);
+        char e1[16], e2[16]; fmt_clock(g_ch_pos - g_chlist[cur].start_ms, e1, sizeof e1); fmt_clock(endms - g_chlist[cur].start_ms, e2, sizeof e2);
+        snprintf(b, sizeof b, "%s / %s", e1, e2); lv_label_set_text(g_ch_time, b);
+    }
+    if(cur != g_ch_cur){ g_ch_cur = cur; }
+    /* the cover (the playing book's) in the middle */
+    const void *dsc = ui_current_cover_dsc();
+    lv_image_set_src(g_ch_cimg, NULL);
+    if(dsc){ const lv_image_dsc_t *d = dsc; lv_image_set_src(g_ch_cimg, dsc);
+             if(d->header.w > 0) lv_image_set_scale(g_ch_cimg, (uint32_t)(76 * 256 / d->header.w) + 2);
+             lv_obj_center(g_ch_cimg); lv_obj_remove_flag(g_ch_cimg, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(g_ch_cnote, LV_OBJ_FLAG_HIDDEN); }
+    else { lv_obj_add_flag(g_ch_cimg, LV_OBJ_FLAG_HIDDEN); lv_obj_remove_flag(g_ch_cnote, LV_OBJ_FLAG_HIDDEN); }
+    lv_obj_set_style_bg_color(g_ch_cover, ui_media_accent(), 0);
+}
+static void ch_ring_cb(lv_event_t *e){                          /* a tap on a segment */
+    if(g_chlist_n < 1 || g_chlist_n > CH_SEG_MAX) return;
+    lv_indev_t *in = lv_indev_active(); if(!in) return;
+    lv_point_t p; lv_indev_get_point(in, &p);
+    float dx = p.x - 180.0f, dy = p.y - 180.0f, d = sqrtf(dx * dx + dy * dy);
+    if(d < CH_R - CH_W - 14 || d > CH_R + 22) return;
+    float a = atan2f(dx, -dy) * 57.29578f; if(a < 0) a += 360.0f;
+    chap_jump((int)(a / (360.0f / g_chlist_n)) % g_chlist_n);
+}
+static void ch_step_cb(lv_event_t *e){
+    int dir = (int)(intptr_t)lv_event_get_user_data(e);
+    if(g_chlist_n < 1) return;
+    int cur = chap_current(g_ch_pos), to = cur + dir;
+    if(dir < 0 && g_ch_pos - g_chlist[cur].start_ms > 3000) to = cur;    /* like a player: first back to this chapter's start */
+    if(to < 0) to = 0;
+    if(to >= g_chlist_n){ ui_toast("Last chapter"); return; }
+    chap_jump(to);
+}
+static void ch_list_cb(lv_event_t *e){ (void)e; if(g_chap_ov){ lv_obj_remove_flag(g_chap_ov, LV_OBJ_FLAG_HIDDEN); } }
+static void ch_list_close_cb(lv_event_t *e){ (void)e; if(g_chap_ov) lv_obj_add_flag(g_chap_ov, LV_OBJ_FLAG_HIDDEN); }
+static void ch_tick(lv_timer_t *t){ (void)t; if(screen_current() == SCR_CHAPTERS && g_chap_ov && lv_obj_has_flag(g_chap_ov, LV_OBJ_FLAG_HIDDEN)) chapters_paint(); }
+static lv_obj_t *ch_btn(lv_obj_t *root, const char *txt, int cx, int w, int dir, lv_event_cb_t cb){
+    lv_obj_t *b = lv_button_create(root);
+    lv_obj_remove_style_all(b);
+    lv_obj_set_size(b, w, 32); lv_obj_set_pos(b, cx - w / 2, 236);
+    lv_obj_set_style_radius(b, 16, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(TH_SURF1), 0); lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(TH_SURF2), LV_STATE_PRESSED);
+    lv_obj_set_ext_click_area(b, 4);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, (void *)(intptr_t)dir);
+    lv_obj_t *l = lv_label_create(b); lv_label_set_text(l, txt);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0); lv_obj_set_style_text_color(l, lv_color_hex(TH_TXT1), 0); lv_obj_center(l);
+    return b;
+}
 void chapters_create(lv_obj_t *root){
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
-    ui_header(root, "Chapters");
-
-    g_chap_list = lv_obj_create(root);
+    lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+    g_ch_buf = malloc(LV_CANVAS_BUF_SIZE(360, 360, 32, LV_DRAW_BUF_STRIDE_ALIGN));
+    if(g_ch_buf){
+        g_ch_canvas = lv_canvas_create(root);
+        lv_canvas_set_buffer(g_ch_canvas, g_ch_buf, 360, 360, LV_COLOR_FORMAT_XRGB8888);
+        lv_obj_clear_flag(g_ch_canvas, LV_OBJ_FLAG_CLICKABLE);
+    }
+    g_ch_hit = lv_obj_create(root);                                     /* taps on the ring */
+    lv_obj_remove_style_all(g_ch_hit);
+    lv_obj_set_size(g_ch_hit, 360, 360);
+    lv_obj_add_flag(g_ch_hit, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(g_ch_hit, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(g_ch_hit, ch_ring_cb, LV_EVENT_SHORT_CLICKED, NULL);
+    g_ch_cover = lv_obj_create(root);
+    lv_obj_remove_style_all(g_ch_cover);
+    lv_obj_set_size(g_ch_cover, 76, 76); lv_obj_align(g_ch_cover, LV_ALIGN_TOP_MID, 0, 62);
+    lv_obj_set_style_radius(g_ch_cover, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_clip_corner(g_ch_cover, true, 0);
+    lv_obj_set_style_bg_opa(g_ch_cover, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(g_ch_cover, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    g_ch_cnote = lv_label_create(g_ch_cover); lv_label_set_text(g_ch_cnote, LV_SYMBOL_AUDIO);
+    lv_obj_set_style_text_font(g_ch_cnote, &lv_font_montserrat_20, 0); lv_obj_set_style_text_color(g_ch_cnote, lv_color_hex(0xFFFFFF), 0); lv_obj_center(g_ch_cnote);
+    g_ch_cimg = lv_image_create(g_ch_cover); lv_obj_add_flag(g_ch_cimg, LV_OBJ_FLAG_HIDDEN);
+    g_ch_num = lv_label_create(root);
+    lv_obj_set_style_text_font(g_ch_num, ui_font_cjk(16), 0); lv_obj_set_style_text_color(g_ch_num, lv_color_hex(TH_TXT1), 0);
+    lv_obj_align(g_ch_num, LV_ALIGN_TOP_MID, 0, 148);
+    g_ch_title = lv_label_create(root);
+    lv_label_set_long_mode(g_ch_title, LV_LABEL_LONG_DOT); lv_obj_set_width(g_ch_title, 190);
+    lv_obj_set_style_text_align(g_ch_title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(g_ch_title, ui_font_cjk(14), 0); lv_obj_set_style_text_color(g_ch_title, lv_color_hex(TH_TXT2), 0);
+    lv_obj_align(g_ch_title, LV_ALIGN_TOP_MID, 0, 172);
+    g_ch_time = lv_label_create(root);
+    lv_obj_set_style_text_font(g_ch_time, &lv_font_montserrat_12, 0); lv_obj_set_style_text_color(g_ch_time, lv_color_hex(TH_TXT3), 0);
+    lv_obj_align(g_ch_time, LV_ALIGN_TOP_MID, 0, 198);
+    g_ch_prev = ch_btn(root, LV_SYMBOL_LEFT, 132, 40, -1, ch_step_cb);
+    g_ch_list_btn = ch_btn(root, "List", 180, 48, 0, ch_list_cb);
+    g_ch_next = ch_btn(root, LV_SYMBOL_RIGHT, 228, 40, +1, ch_step_cb);
+    /* the full list (every chapter, any length of book), in an overlay */
+    g_chap_ov = lv_obj_create(root);
+    lv_obj_remove_style_all(g_chap_ov);
+    lv_obj_set_size(g_chap_ov, 360, 360);
+    lv_obj_set_style_bg_color(g_chap_ov, lv_color_hex(TH_BG), 0); lv_obj_set_style_bg_opa(g_chap_ov, LV_OPA_COVER, 0);
+    lv_obj_add_flag(g_chap_ov, LV_OBJ_FLAG_CLICKABLE); lv_obj_clear_flag(g_chap_ov, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *ht = lv_label_create(g_chap_ov); lv_label_set_text(ht, "Chapters");
+    lv_obj_set_style_text_font(ht, TH_F_CAPTION, 0); lv_obj_set_style_text_color(ht, lv_color_hex(TH_TXT2), 0);
+    lv_obj_align(ht, LV_ALIGN_TOP_MID, -22, 22);
+    lv_obj_t *dn = lv_button_create(g_chap_ov);
+    lv_obj_remove_style_all(dn);
+    lv_obj_set_size(dn, 50, 22); lv_obj_align(dn, LV_ALIGN_TOP_MID, 26, 18);
+    lv_obj_set_style_radius(dn, 11, 0); lv_obj_set_style_bg_color(dn, lv_color_hex(TH_SURF1), 0); lv_obj_set_style_bg_opa(dn, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(dn, ch_list_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *dl = lv_label_create(dn); lv_label_set_text(dl, "Done"); lv_obj_set_style_text_font(dl, TH_F_CAPTION, 0); lv_obj_set_style_text_color(dl, lv_color_hex(TH_TXT1), 0); lv_obj_center(dl);
+    g_chap_list = lv_obj_create(g_chap_ov);
     lv_obj_remove_style_all(g_chap_list);
-    lv_obj_set_pos(g_chap_list, 30, 72); lv_obj_set_size(g_chap_list, 300, 272);
+    lv_obj_set_pos(g_chap_list, 30, 56); lv_obj_set_size(g_chap_list, 300, 290);
     lv_obj_set_style_pad_bottom(g_chap_list, 44, 0);
     lv_obj_set_style_bg_opa(g_chap_list, LV_OPA_TRANSP, 0);
     lv_obj_set_flex_flow(g_chap_list, LV_FLEX_FLOW_COLUMN);
@@ -305,9 +502,13 @@ void chapters_create(lv_obj_t *root){
     lv_obj_set_scroll_dir(g_chap_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(g_chap_list, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(g_chap_list, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    lv_obj_add_flag(g_chap_ov, LV_OBJ_FLAG_HIDDEN);
+    if(!g_ch_tmr) g_ch_tmr = lv_timer_create(ch_tick, 1000, NULL);
 }
 
 void chapters_open(void){
+    if(g_chap_ov) lv_obj_add_flag(g_chap_ov, LV_OBJ_FLAG_HIDDEN);
     chapters_rebuild();
+    chapters_paint();
     screen_show(SCR_CHAPTERS);
 }

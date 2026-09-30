@@ -87,7 +87,7 @@ lv_display_t *fbpan_create(const char *dev){
 
     /* PARTIAL mode: two small banded draw buffers (~60 rows) instead of two full
      * 518KB frames - ~1MB less RAM and the renderer only touches dirty regions. */
-    #define FBPAN_BAND_ROWS 60
+    #define FBPAN_BAND_ROWS 120   /* 2 x 173 KB: ~10% faster full redraws (transitions, screen changes) than 60 */
     size_t bufsz = (size_t)f->vinfo.xres * FBPAN_BAND_ROWS * 4;
     uint8_t *b1 = aligned_alloc(64, bufsz);
     uint8_t *b2 = aligned_alloc(64, bufsz);
