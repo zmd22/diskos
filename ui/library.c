@@ -675,7 +675,7 @@ static void hdr_btn(lv_obj_t *row, int x, const char *txt, lv_event_cb_t cb){
     int br = th_braun();                                            /* Braun: flat off-white keys, dark type */
     lv_obj_set_style_bg_color(b, lv_color_hex(br ? BR_SURF : 0x1C1C1E), 0);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(br ? 0xCFC8BC : 0x2C2C2E), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(b, lv_color_hex(br ? BR_PRESS : 0x2C2C2E), LV_STATE_PRESSED);
     lv_obj_add_flag(b, LV_OBJ_FLAG_USER_4);                         /* Braun's row pass leaves this key's colours alone */
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l = lv_label_create(b);

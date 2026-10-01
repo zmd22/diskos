@@ -129,18 +129,18 @@ static int fx(int i){ return (int)lroundf(FX0 + i * FSTEP); }
 static void braun_faders_create(lv_obj_t *root){
     lv_obj_t *zero = lv_obj_create(root); lv_obj_remove_style_all(zero);        /* the 0 dB line */
     lv_obj_set_size(zero, 272, 1); lv_obj_set_pos(zero, 44, FMID);
-    lv_obj_set_style_bg_color(zero, lv_color_hex(0xBAB4AA), 0); lv_obj_set_style_bg_opa(zero, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(zero, lv_color_hex(br_pick(0xBAB4AA, 0x55534E)), 0); lv_obj_set_style_bg_opa(zero, LV_OPA_COVER, 0);
     static const char *const SC[3] = { "+6", "0", "\xE2\x88\x92" "6" };
     for(int k = 0; k < 3; k++){ lv_obj_t *l = br_label(root, SC[k], br_font(12, 0), BR_TXT3);
         lv_obj_align(l, LV_ALIGN_TOP_LEFT, 38, (k == 0 ? FTOP : k == 1 ? FMID : FBOT) - 8); }
     for(int i = 0; i < NB; i++){
         g_fslot[i] = lv_obj_create(root); lv_obj_remove_style_all(g_fslot[i]);
         lv_obj_set_size(g_fslot[i], 6, FBOT - FTOP); lv_obj_set_pos(g_fslot[i], fx(i) - 3, FTOP);
-        lv_obj_set_style_radius(g_fslot[i], 3, 0); lv_obj_set_style_bg_color(g_fslot[i], lv_color_hex(0x282624), 0); lv_obj_set_style_bg_opa(g_fslot[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(g_fslot[i], 3, 0); lv_obj_set_style_bg_color(g_fslot[i], lv_color_hex(br_pick(0x282624, 0x0E0E0D)), 0); lv_obj_set_style_bg_opa(g_fslot[i], LV_OPA_COVER, 0);
         g_fcap[i] = lv_obj_create(root); lv_obj_remove_style_all(g_fcap[i]);
         lv_obj_set_size(g_fcap[i], 18, 12); lv_obj_set_style_radius(g_fcap[i], 2, 0);
         lv_obj_set_style_bg_color(g_fcap[i], lv_color_hex(BR_KNOB), 0); lv_obj_set_style_bg_opa(g_fcap[i], LV_OPA_COVER, 0);
-        lv_obj_set_style_shadow_color(g_fcap[i], lv_color_hex(0x9C968C), 0); lv_obj_set_style_shadow_width(g_fcap[i], 4, 0); lv_obj_set_style_shadow_offset_y(g_fcap[i], 1, 0);
+        lv_obj_set_style_shadow_color(g_fcap[i], lv_color_hex(BR_SHADOW), 0); lv_obj_set_style_shadow_width(g_fcap[i], 4, 0); lv_obj_set_style_shadow_offset_y(g_fcap[i], 1, 0);
         g_fline[i] = lv_obj_create(g_fcap[i]); lv_obj_remove_style_all(g_fline[i]);
         lv_obj_set_size(g_fline[i], 12, 2); lv_obj_center(g_fline[i]);
         lv_obj_set_style_bg_opa(g_fline[i], LV_OPA_COVER, 0);
@@ -155,8 +155,8 @@ static void braun_faders_paint(void){
         int t = clampi(g_t[i], -GMAX, GMAX);
         int y = (int)lroundf(FMID - t / 10.0f * FKPX);
         lv_obj_set_pos(g_fcap[i], fx(i) - 9, y - 6);
-        lv_obj_set_style_bg_color(g_fcap[i], lv_color_hex(g_editable ? BR_KNOB : 0x96928B), 0);
-        lv_obj_set_style_bg_color(g_fline[i], lv_color_hex(i == g_sel && g_editable ? BR_ACC : g_editable ? 0xC8C4BC : 0xDCD8D0), 0);
+        lv_obj_set_style_bg_color(g_fcap[i], lv_color_hex(g_editable ? BR_KNOB : br_pick(0x96928B, 0x6A6862)), 0);
+        lv_obj_set_style_bg_color(g_fline[i], lv_color_hex(i == g_sel && g_editable ? BR_ACC : g_editable ? br_pick(0xC8C4BC, 0x4A4945) : br_pick(0xDCD8D0, 0x8A867E)), 0);
     }
     if(g_sel >= 0 && g_editable){ lv_obj_set_pos(g_flamp, fx(g_sel) - 3, FTOP - 12); lv_obj_remove_flag(g_flamp, LV_OBJ_FLAG_HIDDEN); }
     else lv_obj_add_flag(g_flamp, LV_OBJ_FLAG_HIDDEN);

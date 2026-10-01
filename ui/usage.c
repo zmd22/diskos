@@ -151,7 +151,7 @@ static void fill_band(uint32_t from, uint32_t to){
             if(lvl[m] < 0) continue;
             float r = R0 + (R1 - R0) * lvl[m] / 100.0f;
             if(d2 > r * r) continue;
-            row[x] = th_braun() ? (chg[m] ? 0xFFC6DEC9 : 0xFFD2CCC2) : (chg[m] ? 0x0F3A1B : 0x2E2E32);   /* charging: green tint, else soft grey */
+            row[x] = th_braun() ? (chg[m] ? (0xFF000000u | br_pick(0xC6DEC9, 0x22352A)) : (0xFF000000u | br_pick(0xD2CCC2, 0x3E3D39))) : (chg[m] ? 0x0F3A1B : 0x2E2E32);   /* charging: green tint, else soft grey */
         }
     }
 }
@@ -177,7 +177,7 @@ static void draw(void){
     int br = th_braun();                                     /* Braun: ink on paper - black level line, grey screen-on, orange playing */
     lv_color_t grid = lv_color_hex(br ? BR_RULE : 0x28282A), white = lv_color_hex(br ? BR_TXT : 0xF0F0F5), green = lv_color_hex(0x34C759),
                amber = lv_color_hex(br ? BR_TXT2 : 0xFFD60A), red = lv_color_hex(br ? BR_ACC : TH_ACCENT);
-    lv_color_t faint = lv_color_hex(br ? 0xE4DED4 : 0x1E1E20);
+    lv_color_t faint = lv_color_hex(br ? br_pick(0xE4DED4, 0x2A2926) : 0x1E1E20);
     for(int k = 0; k <= 4; k++) arc(&L, R0 + (R1 - R0) * k / 4.0f, 1, 0, 360, k % 4 ? faint : grid, k % 4 ? LV_OPA_60 : LV_OPA_COVER);
     arc(&L, RS, br ? 4 : 5, 0, 360, faint, LV_OPA_COVER);
     arc(&L, RP, br ? 4 : 5, 0, 360, faint, LV_OPA_COVER);

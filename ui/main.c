@@ -2622,6 +2622,17 @@ int main(int argc, char **argv){
             }
         }
 
+        {   /* Auto day/night (Braun): when the hour crosses 20:00 / 07:00, switch to the other variant the next time
+             * the screen is off, so the restart is never seen. Checked once a minute. */
+            static uint32_t last_dn;
+            if(lv_tick_elaps(last_dn) >= 60000){
+                last_dn = lv_tick_get();
+                if(bl_state == 2 && th_braun() && cfg_get_int("theme_auto", 0) && th_want_dark() != br_dark()){
+                    fprintf(stderr, "auto day/night: switching Braun to %s\n", th_want_dark() ? "dark" : "light"); fflush(stderr);
+                    ui_restart();
+                }
+            }
+        }
         usage_tick(bl_state != 2, g_playing);   /* Battery & usage: one sample a minute */
         {   /* auto power-off (see ao_* above) */
             static const int AO_MIN[5] = { 0, 10, 20, 30, 60 };

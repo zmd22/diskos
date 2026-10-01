@@ -2791,13 +2791,13 @@ void ui_show_volume(int vol)
                 mk[k][1].x = 180 + r2 * cosf(an); mk[k][1].y = 180 + r2 * sinf(an);
                 lv_obj_t *l = lv_line_create(g_vol_panel); lv_line_set_points(l, mk[k], 2);
                 lv_obj_set_style_line_width(l, major ? 2 : 1, 0);
-                lv_obj_set_style_line_color(l, lv_color_hex(major ? 0xECE8E0 : 0x96928B), 0);
+                lv_obj_set_style_line_color(l, lv_color_hex(major ? br_pick(0xECE8E0, 0x2A2926) : br_pick(0x96928B, 0x6A6862)), 0);
                 lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE);
             }
             static const char *const LB[3] = { "0", "60", "120" }; static const int LK[3] = { 0, 12, 24 };
             for(int i = 0; i < 3; i++){
                 float an = (48 - LK[i] * 4 + (i == 0 ? -5 : i == 2 ? 5 : 0)) * 0.0174533f;   /* the end labels a little inward, onto the band */
-                lv_obj_t *l = br_label(g_vol_panel, LB[i], br_font(12, 0), 0xECE8E0);
+                lv_obj_t *l = br_label(g_vol_panel, LB[i], br_font(12, 0), br_pick(0xECE8E0, 0x2A2926));
                 lv_obj_align(l, LV_ALIGN_CENTER, (int32_t)(145 * cosf(an)), (int32_t)(145 * sinf(an)));   /* fully on the band */
             }
             /* the number box */
@@ -2813,8 +2813,8 @@ void ui_show_volume(int vol)
             lv_obj_add_flag(spk, LV_OBJ_FLAG_IGNORE_LAYOUT);
             lv_obj_set_style_text_font(spk, &lv_font_montserrat_14, 0); lv_obj_set_style_text_color(spk, lv_color_hex(BR_ACC), 0);
             lv_obj_align(spk, LV_ALIGN_TOP_LEFT, 12, 8);
-            lv_obj_set_style_text_font(g_vol_num, br_font(44, 1), 0); lv_obj_set_style_text_color(g_vol_num, lv_color_hex(0xF8F5EE), 0);
-            lv_obj_t *cap = br_label(badge, "VOLUME", br_font(12, 0), 0xB0ACA4);
+            lv_obj_set_style_text_font(g_vol_num, br_font(44, 1), 0); lv_obj_set_style_text_color(g_vol_num, lv_color_hex(br_pick(0xF8F5EE, 0x1C1B19)), 0);
+            lv_obj_t *cap = br_label(badge, "VOLUME", br_font(12, 0), br_pick(0xB0ACA4, 0x55534E));
             (void)cap;
             g_vol_needle = lv_line_create(g_vol_panel);                /* the orange needle across the band */
             lv_obj_set_style_line_width(g_vol_needle, 3, 0); lv_obj_set_style_line_rounded(g_vol_needle, true, 0);

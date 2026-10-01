@@ -2,6 +2,7 @@
 /* Copyright (C) 2026 diskOS contributors */
 /* The Braun theme's building blocks (see braun.h). */
 #include "braun.h"
+#include <time.h>
 #include "theme.h"
 #include "config.h"
 #include <stdlib.h>
@@ -32,22 +33,48 @@ const lv_font_t *br_font(int size, int bold){
     return &f[0];
 }
 
-static int g_theme = -1;
-int th_braun(void){
+/* Settings > Display > Theme (cfg "ui_theme"): 0 Ring, 1 Braun, 2 Braun Dark. Auto day/night (cfg "theme_auto")
+ * runs the Braun family dark from 20:00 to 07:00. Read once at boot; a change restarts the UI (main.c switches
+ * at the next screen-off when the hour crosses over). */
+static int g_theme = -1, g_dark = -1;
+static int th_index(void){
 #ifdef TH_FORCE_BRAUN
     return 1;                                                /* test renders only */
 #endif
-    if(g_theme < 0) g_theme = cfg_get_int("ui_theme", 0) == 1;
+#ifdef TH_FORCE_BRAUN_DARK
+    return 2;
+#endif
+    if(g_theme < 0){ int v = cfg_get_int("ui_theme", 0); g_theme = (v >= 0 && v <= 2) ? v : 0; }
     return g_theme;
 }
+int th_braun(void){ int t = th_index(); return t == 1 || t == 2; }
+int th_night_now(void){ time_t now = time(NULL); struct tm tm; localtime_r(&now, &tm); return tm.tm_hour >= 20 || tm.tm_hour < 7; }
+/* the variant the current settings and clock ask for (Braun family only) */
+int th_want_dark(void){
+#ifdef TH_FORCE_BRAUN_DARK
+    return 1;
+#endif
+    if(!th_braun()) return 0;
+    if(cfg_get_int("theme_auto", 0)) return th_night_now();
+    return th_index() == 2;
+}
+int br_dark(void){ if(g_dark < 0) g_dark = th_want_dark(); return g_dark; }   /* fixed for this run */
+uint32_t br_pick(uint32_t light, uint32_t dark){ return br_dark() ? dark : light; }
 
 /* ---- the palettes behind theme.h's tokens ---- */
-static const uint32_t PAL[2][TH_C_COUNT] = {
-    /*            BG        SURF1     SURF2     TRACK     TXT1      TXT2      TXT3      ACCENT    MUTED     SOFT      ONACC */
-    /* Ring  */ { 0x000000, 0x1C1C1E, 0x2C2C2E, 0x3A3A3C, 0xFFFFFF, 0xAEAEB2, 0x636366, 0xE4122C, 0x8E8E93, 0xC7C7CC, 0xFFFFFF },
-    /* Braun */ { BR_BG,    BR_SURF,  0xCFC8BC, BR_SURF,  BR_TXT,   BR_TXT2,  BR_TXT3,  BR_ACC,   0x7A766F, 0x55524C, 0xFFFFFF },
-};
-uint32_t th_hex(int token){ return (token >= 0 && token < TH_C_COUNT) ? PAL[th_braun() ? 1 : 0][token] : 0xFF00FF; }
+static const uint32_t PAL_RING[TH_C_COUNT] =
+    /*  BG        SURF1     SURF2     TRACK     TXT1      TXT2      TXT3      ACCENT    MUTED     SOFT      ONACC */
+    { 0x000000, 0x1C1C1E, 0x2C2C2E, 0x3A3A3C, 0xFFFFFF, 0xAEAEB2, 0x636366, 0xE4122C, 0x8E8E93, 0xC7C7CC, 0xFFFFFF };
+uint32_t th_hex(int token){
+    if(token < 0 || token >= TH_C_COUNT) return 0xFF00FF;
+    if(!th_braun()) return PAL_RING[token];
+    switch(token){
+        case TH_C_BG: return BR_BG;     case TH_C_SURF1: return BR_SURF;  case TH_C_SURF2: return br_pick(0xCFC8BC, 0x3E3D39);
+        case TH_C_TRACK: return BR_SURF; case TH_C_TXT1: return BR_TXT;  case TH_C_TXT2: return BR_TXT2;
+        case TH_C_TXT3: return BR_TXT3; case TH_C_ACCENT: return BR_ACC;  case TH_C_MUTED: return br_pick(0x7A766F, 0x8A867E);
+        case TH_C_SOFT: return br_pick(0x55524C, 0xC8C4BB); default: return 0xFFFFFF;
+    }
+}
 
 /* ---- the grille: one 360x360 image, drawn once into RAM and shared by every screen ---- */
 static lv_image_dsc_t g_grille; static uint8_t *g_grille_px;
@@ -115,14 +142,14 @@ lv_obj_t *br_knob(lv_obj_t *parent, int cx, int cy, int r, const char *icon, con
     lv_obj_set_style_radius(k, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(k, lv_color_hex(BR_KNOB), 0); lv_obj_set_style_bg_opa(k, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(k, lv_color_hex(BR_KNOB_L), 0); lv_obj_set_style_border_width(k, 2, 0);
-    lv_obj_set_style_shadow_color(k, lv_color_hex(0xA8A296), 0); lv_obj_set_style_shadow_width(k, 6, 0); lv_obj_set_style_shadow_offset_y(k, 2, 0);
+    lv_obj_set_style_shadow_color(k, lv_color_hex(BR_SHADOW), 0); lv_obj_set_style_shadow_width(k, 6, 0); lv_obj_set_style_shadow_offset_y(k, 2, 0);
     lv_obj_clear_flag(k, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *l = lv_label_create(k); lv_label_set_text(l, icon ? icon : "");
     if(font) lv_obj_set_style_text_font(l, font, 0);
-    lv_obj_set_style_text_color(l, lv_color_hex(0xFFFFFF), 0); lv_obj_center(l);
+    lv_obj_set_style_text_color(l, lv_color_hex(BR_KNOB_IC), 0); lv_obj_center(l);
     lv_obj_t *p = lv_obj_create(k);                              /* the pointer, at 1 o'clock */
     lv_obj_remove_style_all(p); lv_obj_set_size(p, 3, r / 3);
-    lv_obj_set_style_bg_color(p, lv_color_hex(0xC8C4BC), 0); lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(p, lv_color_hex(BR_PTR), 0); lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(p, 1, 0); lv_obj_align(p, LV_ALIGN_TOP_MID, r / 3, 3);
     lv_obj_set_style_transform_rotation(p, 300, 0);
     lv_obj_clear_flag(p, LV_OBJ_FLAG_CLICKABLE);
@@ -137,7 +164,7 @@ lv_obj_t *br_knob(lv_obj_t *parent, int cx, int cy, int r, const char *icon, con
 void br_knob_set_on(lv_obj_t *k, int on){
     if(!k) return;
     lv_obj_t *p = lv_obj_get_child(k, 1), *lamp = lv_obj_get_user_data(k);
-    if(p) lv_obj_set_style_bg_color(p, lv_color_hex(on ? BR_ACC : 0xC8C4BC), 0);
+    if(p) lv_obj_set_style_bg_color(p, lv_color_hex(on ? BR_ACC : BR_PTR), 0);
     if(lamp){ if(on) lv_obj_remove_flag(lamp, LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(lamp, LV_OBJ_FLAG_HIDDEN); }
 }
 lv_obj_t *br_button(lv_obj_t *parent, int cx, int cy, int r, const char *icon, const lv_font_t *font, int primary){
@@ -146,7 +173,7 @@ lv_obj_t *br_button(lv_obj_t *parent, int cx, int cy, int r, const char *icon, c
     lv_obj_set_size(b, 2 * r, 2 * r); lv_obj_set_pos(b, cx - r, cy - r);
     lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(b, lv_color_hex(primary ? BR_ACC : BR_SURF), 0); lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(primary ? 0xC84C12 : 0xCFC8BC), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(b, lv_color_hex(primary ? 0xC84C12 : BR_PRESS), LV_STATE_PRESSED);
     lv_obj_set_ext_click_area(b, 6);
     lv_obj_t *l = lv_label_create(b); lv_label_set_text(l, icon ? icon : "");
     if(font) lv_obj_set_style_text_font(l, font, 0);
@@ -156,8 +183,8 @@ lv_obj_t *br_button(lv_obj_t *parent, int cx, int cy, int r, const char *icon, c
 void br_style_switch(lv_obj_t *sw){                          /* a slot with a dark slider; the slot goes orange-tinted when on */
     lv_obj_set_size(sw, 44, 20);
     lv_obj_set_style_bg_color(sw, lv_color_hex(BR_SURF), LV_PART_MAIN);
-    lv_obj_set_style_border_color(sw, lv_color_hex(0xC4BEB4), LV_PART_MAIN); lv_obj_set_style_border_width(sw, 1, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(sw, lv_color_hex(0xF3C7AE), (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_border_color(sw, lv_color_hex(BR_DOT), LV_PART_MAIN); lv_obj_set_style_border_width(sw, 1, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(br_pick(0xF3C7AE, 0x6A3518)), (lv_style_selector_t)LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_set_style_bg_color(sw, lv_color_hex(BR_KNOB), LV_PART_KNOB);
     lv_obj_set_style_radius(sw, 5, LV_PART_KNOB);
     lv_obj_set_style_pad_all(sw, -2, LV_PART_KNOB);

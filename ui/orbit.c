@@ -82,7 +82,7 @@ void orbit_set_on(orbit_t *o, int i, int on, lv_color_t accent){
     if(i < 0 || i >= o->n) return;
     if(th_braun()){                                              /* on: the pointer turns orange, the lamp lights */
         if(o->icon[i]) lv_obj_set_style_text_color(o->icon[i], lv_color_hex(BR_KNOB_IC), 0);
-        if(o->ptr[i]) lv_obj_set_style_bg_color(o->ptr[i], lv_color_hex(on ? BR_ACC : 0xC8C4BC), 0);
+        if(o->ptr[i]) lv_obj_set_style_bg_color(o->ptr[i], lv_color_hex(on ? BR_ACC : BR_PTR), 0);
         if(o->lamp[i]){ if(on) lv_obj_remove_flag(o->lamp[i], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(o->lamp[i], LV_OBJ_FLAG_HIDDEN); }
         if(o->cap[i]){ lv_obj_set_style_text_color(o->cap[i], lv_color_hex(on ? BR_TXT : BR_TXT2), 0);
                        lv_obj_set_style_text_font(o->cap[i], br_font(12, 0), 0); }

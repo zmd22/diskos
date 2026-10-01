@@ -14,16 +14,17 @@
 
 This fork of [b0hemia/diskos](https://github.com/b0hemia/diskos) by [zmd22](https://github.com/zmd22) replaces the
 on-device UI (`ui/`, the `mq_ui` binary) of the **FiiO Snowsky Disc** with an interface designed for its round
-360×360 screen. The installer is unchanged. Two complete looks ship in one build — **Ring** and **Braun** —
-switchable in **Settings › Display › Theme**.
+360×360 screen. The installer is unchanged. Three looks ship in one build — **Ring**, **Braun** and **Braun Dark** —
+switchable in **Settings › Display › Theme**, with an optional **Auto day/night** that runs Braun dark from 20:00 to 07:00.
 
 * **Based on:** diskOS **1.1.2**, firmware **V2.40**. Upstream 1.1.3's changes are not included.
 * **Every feature, with screenshots:** [docs/fork/FEATURES.md](docs/fork/FEATURES.md)
 * **Detailed change log:** [docs/fork/CHANGES.md](docs/fork/CHANGES.md)
 
-| Ring | Braun |
-|---|---|
-| ![Ring](docs/fork/screenshots/00-overview.png) | ![Braun](docs/fork/screenshots/braun/00-overview.png) |
+![Ring, Braun and Braun Dark](docs/fork/screenshots/99-themes.png)
+
+Full overviews: [Ring](docs/fork/screenshots/00-overview.png) · [Braun](docs/fork/screenshots/braun/00-overview.png) ·
+[Braun Dark](docs/fork/screenshots/braun-dark/00-overview.png)
 
 ---
 
@@ -39,7 +40,9 @@ circle.
 
 **Braun — a second voice.** A 70s Braun / Dieter Rams look built on *less, but better*: warm off-white, a
 speaker-grille texture, dark knobs with a pointer and an indicator lamp, straight lists on a solid lower panel, and
-one orange accent that only ever means *on, primary or focused*. It favours legibility over decoration.
+one orange accent that only ever means *on, primary or focused*. It favours legibility over decoration. **Braun
+Dark** is the same design in a dark finish: a charcoal body and aluminium knobs, like Braun's black hi-fi and the
+ET66 calculator.
 
 **Shared rules.** Big touch targets for one hand; everything reachable by a tap (gestures are shortcuts, never the
 only way); nothing that blocks the music (heavy work runs off the UI thread, lists only build the rows you can see,

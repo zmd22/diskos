@@ -10,7 +10,7 @@
 
 A reworked touch interface for the **FiiO Snowsky Disc** (round 360×360 screen, firmware V2.40), built on the
 UI of **diskOS 1.1.2**. Only `ui/` changes (the `mq_ui` binary); the installer is unchanged. Two complete
-looks ship in the same build — **Ring** (default) and **Braun** — switchable in Settings › Display › Theme.
+looks ship in the same build — **Ring** (default) and **Braun** — switchable in Settings › Display › Theme. Braun also comes as **Braun Dark** (charcoal body, aluminium knobs), and **Auto day/night** switches Braun to dark from 20:00 to 07:00.
 
 > The screenshots are rendered from the real UI code (LVGL, no device); the track, cover, battery, weather and
 > volume shown are invented test data. See `render-harness/`.
@@ -33,19 +33,26 @@ indicator lamp, a solid **lower segment** panel following the round edge, straig
 
 ![Braun overview](screenshots/braun/00-overview.png)
 
-| | Ring | Braun |
-|---|---|---|
-| Home | ![](screenshots/01-home.png) | ![](screenshots/braun/01-home.png) |
-| Now Playing | ![](screenshots/02-now-playing.png) | ![](screenshots/braun/02-now-playing.png) |
-| Volume | ![](screenshots/03-volume.png) | ![](screenshots/braun/03-volume.png) |
-| Now Playing options | ![](screenshots/04-now-playing-options.png) | ![](screenshots/braun/04-now-playing-options.png) |
-| Quick Settings | ![](screenshots/05-quick-settings.png) | ![](screenshots/braun/05-quick-settings.png) |
-| Settings | ![](screenshots/06-settings.png) | ![](screenshots/braun/06-settings.png) |
-| Shortcuts | ![](screenshots/10-shortcuts.png) | ![](screenshots/braun/10-shortcuts.png) |
-| Equalizer | ![](screenshots/11-equalizer.png) | ![](screenshots/braun/11-equalizer.png) |
-| Queue | ![](screenshots/12-queue.png) | ![](screenshots/braun/12-queue.png) |
-| Standby | ![](screenshots/13-standby.png) | ![](screenshots/braun/13-standby.png) |
-| Long-press menu | ![](screenshots/22-song-menu.png) | ![](screenshots/braun/22-song-menu.png) |
+### Braun Dark
+The same Braun in a dark finish: a charcoal body with dark grille dots, off-white type, **aluminium knobs with dark
+icons** and the same orange accent. Pick it in Settings › Display › Theme, or turn on **Auto day/night** (right after
+Theme) to run Braun dark from 20:00 to 07:00; the switch happens the next time the screen is off.
+
+![Braun Dark overview](screenshots/braun-dark/00-overview.png)
+
+| | Ring | Braun | Braun Dark |
+|---|---|---|---|
+| Home | ![](screenshots/01-home.png) | ![](screenshots/braun/01-home.png) | ![](screenshots/braun-dark/01-home.png) |
+| Now Playing | ![](screenshots/02-now-playing.png) | ![](screenshots/braun/02-now-playing.png) | ![](screenshots/braun-dark/02-now-playing.png) |
+| Volume | ![](screenshots/03-volume.png) | ![](screenshots/braun/03-volume.png) | ![](screenshots/braun-dark/03-volume.png) |
+| Now Playing options | ![](screenshots/04-now-playing-options.png) | ![](screenshots/braun/04-now-playing-options.png) | ![](screenshots/braun-dark/04-now-playing-options.png) |
+| Quick Settings | ![](screenshots/05-quick-settings.png) | ![](screenshots/braun/05-quick-settings.png) | ![](screenshots/braun-dark/05-quick-settings.png) |
+| Settings | ![](screenshots/06-settings.png) | ![](screenshots/braun/06-settings.png) | ![](screenshots/braun-dark/06-settings.png) |
+| Shortcuts | ![](screenshots/10-shortcuts.png) | ![](screenshots/braun/10-shortcuts.png) | ![](screenshots/braun-dark/10-shortcuts.png) |
+| Equalizer | ![](screenshots/11-equalizer.png) | ![](screenshots/braun/11-equalizer.png) | ![](screenshots/braun-dark/11-equalizer.png) |
+| Queue | ![](screenshots/12-queue.png) | ![](screenshots/braun/12-queue.png) | ![](screenshots/braun-dark/12-queue.png) |
+| Standby | ![](screenshots/13-standby.png) | ![](screenshots/braun/13-standby.png) | ![](screenshots/braun-dark/13-standby.png) |
+| Long-press menu | ![](screenshots/22-song-menu.png) | ![](screenshots/braun/22-song-menu.png) | ![](screenshots/braun-dark/22-song-menu.png) |
 
 ---
 
@@ -100,10 +107,10 @@ a dark knob whose lamp lights when connected.
 
 | | Ring | Braun |
 |---|---|---|
-| Settings › System, bottom | ![](screenshots/08-settings-system-bottom.png) | ![](screenshots/braun/08-settings-system-bottom.png) |
-| Shut down confirmation | ![](screenshots/09-shutdown-confirm.png) | ![](screenshots/braun/09-shutdown-confirm.png) |
-| Rescan confirmation | ![](screenshots/21-rescan-confirm.png) | ![](screenshots/braun/21-rescan-confirm.png) |
-| Shutting down | ![](screenshots/23-shutting-down.png) | ![](screenshots/braun/23-shutting-down.png) |
+| Settings › System, bottom | ![](screenshots/08-settings-system-bottom.png) | ![](screenshots/braun/08-settings-system-bottom.png) | ![](screenshots/braun-dark/08-settings-system-bottom.png) |
+| Shut down confirmation | ![](screenshots/09-shutdown-confirm.png) | ![](screenshots/braun/09-shutdown-confirm.png) | ![](screenshots/braun-dark/09-shutdown-confirm.png) |
+| Rescan confirmation | ![](screenshots/21-rescan-confirm.png) | ![](screenshots/braun/21-rescan-confirm.png) | ![](screenshots/braun-dark/21-rescan-confirm.png) |
+| Shutting down | ![](screenshots/23-shutting-down.png) | ![](screenshots/braun/23-shutting-down.png) | ![](screenshots/braun-dark/23-shutting-down.png) |
 
 ## Shortcuts (swipe left from Home)
 Up to **five shortcuts** of your choice, set in **Settings › Display › Shortcuts**: Weather, Immersive,
@@ -162,7 +169,7 @@ and static analysis during development.
 ```
 Quick preview without flashing: copy `mq_ui` to the player over SSH (see `docs/PREVIEW_UI_BUILD.md`).
 Build from source: clone b0hemia/diskos at `v1.1.2`, `git apply diskos-ui-fork-vs-upstream.patch`, then
-`cd ui && make CROSS=mipsel-linux-musl-` (musl cross toolchain; see FORK.md). `mq_ui` md5:
-`069ff039e7ff06aee7ed33e80290b9fc`.
+`cd ui && make CROSS=mipsel-linux-musl-` (musl cross toolchain; see DEVELOPMENT.md). `mq_ui` md5:
+`1006661e90d9d64054ac84dcbfac8fd2`.
 
 See **CHANGES.md** for the detailed change log.

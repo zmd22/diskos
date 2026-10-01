@@ -31,8 +31,8 @@ void ui_toast_icon(const char *icon, lv_color_t icol, const char *msg)
     int br = th_braun();                                       /* Braun: an off-white panel, dark text, an orange lamp */
     lv_obj_set_style_bg_color(g_toast, lv_color_hex(br ? BR_PANEL : 0x18181A), 0);
     lv_obj_set_style_bg_opa(g_toast, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(g_toast, lv_color_hex(br ? 0xC4BEB4 : 0x38383C), 0);
-    if(br){ lv_obj_set_style_shadow_color(g_toast, lv_color_hex(0x9C968C), 0); lv_obj_set_style_shadow_width(g_toast, 10, 0); lv_obj_set_style_shadow_offset_y(g_toast, 2, 0); }
+    lv_obj_set_style_border_color(g_toast, lv_color_hex(br ? BR_DOT : 0x38383C), 0);
+    if(br){ lv_obj_set_style_shadow_color(g_toast, lv_color_hex(BR_SHADOW), 0); lv_obj_set_style_shadow_width(g_toast, 10, 0); lv_obj_set_style_shadow_offset_y(g_toast, 2, 0); }
     lv_obj_set_style_border_width(g_toast, 1, 0);
     lv_obj_set_style_radius(g_toast, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_pad_hor(g_toast, 16, 0);
@@ -103,7 +103,7 @@ void ui_scan_orbit(int on){
         }
     }
     for(int k = 0; k < ORB_N; k++){
-        if(th_braun()) lv_obj_set_style_bg_color(g_orb[k], lv_color_hex(k == 0 ? BR_ACC : 0x8E897F), 0);
+        if(th_braun()) lv_obj_set_style_bg_color(g_orb[k], lv_color_hex(k == 0 ? BR_ACC : br_pick(0x8E897F, 0x77736C)), 0);
         else lv_obj_set_style_bg_color(g_orb[k], k == 0 ? lv_color_hex(0xFFFFFF) : ui_current_accent(), 0);
         if(on) lv_obj_remove_flag(g_orb[k], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_orb[k], LV_OBJ_FLAG_HIDDEN);
     }

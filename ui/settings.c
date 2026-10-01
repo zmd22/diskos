@@ -79,6 +79,7 @@ static void apply_theme(int v){                  /* a new theme: the UI restarts
     (void)v; cfg_flush(); ui_toast("Switching theme...");
     lv_timer_t *t = lv_timer_create(theme_restart_cb, 600, NULL); lv_timer_set_repeat_count(t, 1);
 }
+static void apply_theme_auto(int v){ (void)v; if(th_braun() && th_want_dark() != br_dark()) apply_theme(0); }   /* restart only if the look changes now */
 static void apply_autooff(int v){ (void)v; }   /* the main loop reads autooff_idx live */
 static void apply_autotag(int v){ (void)v; }   /* read live by the main loop */
 static void rescan_go(void){
@@ -241,7 +242,8 @@ static const char *const OPT_EQ[]   = { "Off","Jazz","Rock","R&B","Hip-Hop","Pop
 static const char *const OPT_SLEEP[] = { "Off","15 min","30 min","45 min","60 min","90 min" };
 static const char *const OPT_AUTOOFF[] = { "Off","10 min","20 min","30 min","60 min" };
 static const char *const OPT_POWER[] = { "Off","30 sec","1 min","2 min","5 min" };  /* idx->TMAP secs in main.c */
-static const char *const OPT_THEME[] = { "Ring", "Braun" };
+static const char *const OPT_THEME[] = { "Ring", "Braun", "Braun Dark" };
+static const char *const OPT_ONOFF2[] = { "Off", "On" };
 static const char *const OPT_NPSTYLE[] = { "Cover", "Vinyl", "Poster", "Ring" };
 static const char *const OPT_ALBUMVIEW[] = { "List", "Cover Flow" };
 static const char *const OPT_SAVERSTYLE[] = { "Cover", "Analog", "Minimal", "Digital", "Vinyl", "Ring" };
@@ -313,8 +315,10 @@ static const setting_t TABLE[] = {
     /* SPDIF removed: raw 0666 output-route switch wedges the player mid-playback (tears down
      * the local player, g_fiio_local null). Needs the stock stop->switch->resume sequence,
      * not a raw command - revisit if that sequence is decoded. */
-    { "Display",  "Theme",       ST_CYCLER, "ui_theme",   0,0,0, OPT_THEME, 2, NULL, apply_theme, 0,
-      "Ring or Braun. The UI restarts to apply it.", NULL },
+    { "Display",  "Theme",       ST_CYCLER, "ui_theme",   0,0,0, OPT_THEME, 3, NULL, apply_theme, 0,
+      "Ring, Braun or Braun Dark. The UI restarts to apply it.", NULL },
+    { "Display",  "Auto day/night", ST_CYCLER, "theme_auto", 0,0,0, OPT_ONOFF2, 2, NULL, apply_theme_auto, 0,
+      "Braun turns dark from 20:00 to 07:00 (switches the next time the screen is off).", NULL },
     { "Display",  "Brightness",  ST_SLIDER, "brightness", 4,40,2, NULL,0, NULL, apply_brightness, 16,
       "Screen backlight level.", NULL },
     { "Display",  "Shortcuts", ST_ACTION, NULL, 0,0,0, NULL,0, LV_SYMBOL_RIGHT, apply_shortcuts, 0,

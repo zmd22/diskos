@@ -53,7 +53,9 @@ void tagfix_song(const char *path, const char *title, const char *artist, const 
 void tagfix_folder(const char *dir);
 void ui_toast_icon(const char *icon, lv_color_t icol, const char *msg);   /* toast with its own icon */
 void ui_scan_orbit(int on);            /* the rescan dot orbiting the rim */
-void ui_restart(void);                       /* re-exec the UI (theme change) */
+void ui_restart(void);
+int  th_want_dark(void);   /* Braun: the variant the settings and the clock ask for */
+int  th_night_now(void);                       /* re-exec the UI (theme change) */
 void fileops_confirm(const char *title, const char *detail, const char *yes, void (*on_yes)(void));   /* themed Cancel / <yes> dialog on the top layer */
 void fileops_open(const char *dir, const char *name, int is_dir, void (*done)(void));  /* folder browser long-press */
 void tagfix_current_track(void);      /* NP menu: add synced lyrics + artwork the current track is missing */

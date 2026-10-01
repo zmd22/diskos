@@ -2,7 +2,7 @@
 
 **Base:** `b0hemia/diskos` main @ `646212d` (v1.1.2). The UI sources are identical to v1.1.0, so the patch applies to any 1.1.x.
 **Patch:** `diskos-ui-fork-vs-upstream.patch`, sources only (`ui/*.c`, `ui/*.h`, plus `ui/Makefile` for the new `radial.c` and `font_theme_24.c`).
-**Binary:** `mq_ui`, md5 `069ff039e7ff06aee7ed33e80290b9fc`.
+**Binary:** `mq_ui`, md5 `1006661e90d9d64054ac84dcbfac8fd2`.
 
 Applying the patch to a fresh clone of upstream main and building with the project's pinned musl toolchain reproduces this exact binary, byte for byte.
 
@@ -75,6 +75,11 @@ This also corrects `docs/COMMAND_MAP.md`: `0657000C0008` is plain **local playba
 
 ### Braun orbit knobs: white icons
 Icons on the dark knobs of every orbit menu (Quick Settings, Settings, Working mode, Shortcuts, options, long-press and file-action menus) are now white instead of near-black; the Delete icon no longer turns orange in Braun. Knobs, pointer/lamp and the brightness arc are unchanged. Ring theme untouched.
+
+### Braun Dark, and Auto day/night
+* **Settings › Display › Theme** now offers **Ring, Braun or Braun Dark**. Braun Dark keeps every Braun layout with a charcoal body, dark grille dots, off-white type, **aluminium knobs with dark icons** and the same orange accent.
+* **Settings › Display › Auto day/night** (after Theme, Off by default): with a Braun theme selected, Braun runs dark from 20:00 to 07:00 and light otherwise. When the hour crosses over, the switch (a UI restart) happens the next time the screen is off, so it is never seen.
+* Under the hood: every Braun colour is a light/dark pair (`br_pick()`, `BR_*` in `braun.h`), so the grille, clock face, knobs, lists, dialogs and toasts follow by construction; the dozen fixed light colours (equalizer faders, volume scale and number box, knob pointers and shadows, pressed buttons, switch, battery dial tints) were converted. Light Braun and Ring renders are unchanged pixel for pixel (apart from the live clock and the test queue count). Not yet checked on the device: the auto switch itself, and the Bluetooth, Wi-Fi, Battery, Lyrics and Song Info screens in the dark variant.
 
 ### Long press on Back goes Home
 A short tap on any back control steps back one screen, as before; **holding it (400 ms) goes straight to Home** and clears the back history, from any depth (Library, Settings, Files, menus...). One central change in `screen_back()`: it checks whether the click came from a long press (LVGL still sends the click on release), so every back control is covered, header arrows and orbit hubs alike, and each screen's own back clean-up still runs first. The shared header arrow also gets a second handler so arrows that step up *inside* a screen (Library, Files) end at Home too. Swipes, timers and the standby screen are unchanged. Host test with simulated presses: short = one step back, long = Home, on the header arrow and the orbit hub. Not yet checked on the device.
