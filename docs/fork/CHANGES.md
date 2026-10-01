@@ -1,8 +1,8 @@
 # diskOS UI fork — changes vs b0hemia/diskos
 
 **Base:** `b0hemia/diskos` main @ `646212d` (v1.1.2). The UI sources are identical to v1.1.0, so the patch applies to any 1.1.x.
-**Patch:** `diskos-ui-fork-vs-upstream.patch`, sources only (`ui/*.c`, `ui/*.h`, plus `ui/Makefile` for the new `radial.c`).
-**Binary:** `mq_ui`, md5 `fbfc2566e6c5424967f66536878a8652`.
+**Patch:** `diskos-ui-fork-vs-upstream.patch`, sources only (`ui/*.c`, `ui/*.h`, plus `ui/Makefile` for the new `radial.c` and `font_theme_24.c`).
+**Binary:** `mq_ui`, md5 `069ff039e7ff06aee7ed33e80290b9fc`.
 
 Applying the patch to a fresh clone of upstream main and building with the project's pinned musl toolchain reproduces this exact binary, byte for byte.
 
@@ -35,6 +35,29 @@ git apply diskos-ui-fork-vs-upstream.patch
 
 `app_run()` started apps with `fork()`, which must duplicate the whole UI process. On a player holding a large queue there isn't enough free memory for that. The UI now uses `posix_spawn()`, which hands straight over to the new program without the copy.
 
+### Code check (cppcheck + AddressSanitizer/UBSan over every rendered screen)
+* **Braun weather window:** the text clean-up searched a buffer that was not yet terminated, so it could read stale stack bytes (and stop the text in the wrong place). The buffer is now zeroed and terminated before the search.
+* **Boot log:** if redirecting the log to `/usr/data/diskos_boot.log` ever failed, stdout was pointed at a closed stream; now the old output is kept.
+* All 23 screens in both themes ran under AddressSanitizer and UBSan with no reports. Timers were reviewed: the fast ones (immersive record, EQ drag, rescan orbit, album-wall prefetch) only work while their screen or state is active.
+
+### Screen brightness reset after every screen off > on (power button)
+**Cause.** Turning the screen back on with the power button makes the player restore *its own* remembered brightness, and the UI then adopted that value, so the level set in Quick Settings looked reset every time.
+**Fix.** After a power-button wake the UI puts the saved diskOS brightness back instead of copying the player's. While the player has blanked the screen the UI also checks every 80 ms instead of 250 ms, so any flash of the wrong level is shorter. Touch wake and the screensaver already used the saved value.
+**Status:** compiled; not yet checked on the device.
+
+### Bluetooth: time limits instead of freezes (ideas from upstream diskOS 1.1.3)
+**Problem.** The Bluetooth screen and the audio auto-route check could freeze the UI while a paired speaker is switched on but not connected: the auto-route check (every 3 s, on every screen while Bluetooth is on) asked the Bluetooth audio service with no time limit, the "is Bluetooth powered" and "is it connected" checks could stall for up to 4 s, and turning Bluetooth off ran its teardown on the UI thread.
+**First attempt (reverted).** Moving the checks into background threads broke Bluetooth playback on the device. A host test with fake `bluetoothctl` / `bluealsa-cli` scripts could not reproduce it, and the cause was never found.
+**Now (a smaller change, `bt.c` only; everything stays on the UI thread, as upstream does):**
+* The auto-route check is cut off after 500 ms. A check that gets no answer in time changes nothing (the current route is kept); only a real "no speaker" answer clears it.
+* The "is Bluetooth powered" check reads `bluetoothd` from `/proc` and cuts `bluetoothctl show` off after 600 ms, keeping the last answer when it times out. The "connected?" check during a connect is cut off after 1 s (the next 1.5 s tick asks again).
+* A killed check is reaped with a bounded wait (~100 ms) and parked if it is stuck in the kernel, instead of an unbounded `waitpid`.
+* Turning Bluetooth off runs in a background subshell that kills the daemons first (no D-Bus round trip). A Bluetooth bring-up that starts right after waits for that teardown to finish (marker `/tmp/bt_disabling`, at most 10 s), so a quick off then on cannot kill itself.
+* Turning Bluetooth on from **Quick Settings** now waits for readiness like the Bluetooth screen's switch, then starts the audio auto-route and a scan. Before, the tile started neither, so a reconnecting speaker was never routed to.
+* `bt_peer_name()` (a small cached background probe used by the BT DAC / BT streaming mode screens) re-checks at most every 8 s.
+Host test with fake commands: a speaker that connects by itself, leaves and returns routes correctly each time; tap-to-connect routes; with `bluealsa-cli` hanging, the longest UI stall was 502 ms and the route was kept.
+**Status:** compiled and host-tested; **not yet checked on the device**, and the earlier attempt shows the host test is not proof. Not taken from upstream 1.1.3: Bluetooth off by default on fresh installs.
+
 ### Work-mode table (`0657`) for V2.40
 
 Two modes were added to `ui_set_source_mode()`, using values verified on hardware:
@@ -49,6 +72,74 @@ This also corrects `docs/COMMAND_MAP.md`: `0657000C0008` is plain **local playba
 ---
 
 ## UI changes
+
+### Braun orbit knobs: white icons
+Icons on the dark knobs of every orbit menu (Quick Settings, Settings, Working mode, Shortcuts, options, long-press and file-action menus) are now white instead of near-black; the Delete icon no longer turns orange in Braun. Knobs, pointer/lamp and the brightness arc are unchanged. Ring theme untouched.
+
+### Long press on Back goes Home
+A short tap on any back control steps back one screen, as before; **holding it (400 ms) goes straight to Home** and clears the back history, from any depth (Library, Settings, Files, menus...). One central change in `screen_back()`: it checks whether the click came from a long press (LVGL still sends the click on release), so every back control is covered, header arrows and orbit hubs alike, and each screen's own back clean-up still runs first. The shared header arrow also gets a second handler so arrows that step up *inside* a screen (Library, Files) end at Home too. Swipes, timers and the standby screen are unchanged. Host test with simulated presses: short = one step back, long = Home, on the header arrow and the orbit hub. Not yet checked on the device.
+
+### Bluetooth codec picker (Settings > Audio > BT Codec)
+(The picker's detail page has no description text, and the Settings > Network > Bluetooth description that said "SBC, beta" is removed too.)
+Five choices: **LDAC Balanced** (default, 660 kbps), **LDAC Quality** (990 kbps), **LDAC Connection** (330 kbps), **AAC**, **SBC**. Until now the UI always asked for SBC.
+* **How it applies.** When a speaker is routed the UI sends the player its own codec frame, the way the stock UI does (`06b3<len><codec><MAC>`; codec 0 SBC, 1 AAC, 2/3/4 LDAC mobile/standard/high; the LDAC level is part of that value). Changing the setting while a speaker is routed re-sends it.
+* **Check and fallback.** A short background thread then reads what bluealsa really selected (`bluealsa-cli info <pcm>`) and, if it is not the wanted codec, asks bluealsa for it (`bluealsa-cli codec <pcm> <name>`). If the speaker does not offer it, it falls back **LDAC > AAC > SBC** (SBC is mandatory in A2DP, so it is always the last resort), and a toast says e.g. "LDAC not available - using AAC". Every command is time-limited; the UI thread only polls the result.
+* **Host test** with a stateful fake `bluealsa-cli`: LDAC wanted + offered switches to LDAC; LDAC wanted but only AAC offered ends on AAC; only SBC offered ends on SBC; choosing SBC or AAC while on LDAC switches down.
+* **Not checked on the device.** Assumed, not verified: that the player's `06b3` frame makes the player set its output rate for LDAC (the docs say 96 kHz) and that `bluealsa-cli codec` can renegotiate while a track plays (it may cause a short break). Heavier codecs may stutter on this CPU (only SBC at medium quality was measured; the docs call out an xrun benchmark for others). **If playback breaks, choose SBC in Settings > Audio > BT Codec**; that is the old behaviour. The "Connected - <codec>" text on the Bluetooth screen shows what was actually negotiated.
+
+### Bluetooth screen shows the codec
+The header under the connected device's name and the device row now read "Connected - SBC" (or AAC, LDAC, aptX...), taken from the `Codec:` / `Selected codec:` line of `bluealsa-cli info` for that device's PCM. It is read on the scan's background thread (1.5 s limit); when bluealsa gives no answer the text stays plain "Connected". Not yet checked on the device (the output format of this bluealsa version is assumed; the parser accepts both common spellings).
+
+### Rescan library asks first
+Quick Settings > Rescan and Settings > System > Rescan Library now open a themed "Rescan library?" dialog (Cancel / Rescan) instead of starting the scan. While a scan is running the tile says "Already scanning". The confirm dialog is the file-operations one, now shared; its label on the accent button is white in Braun (it was dark).
+
+### Shutting down screen and "Shut down player"
+* A themed **Shutting down** screen: Ring = a full accent ring around a power symbol; Braun = the grille face with a dark knob, orange lamp lit. It is drawn before the slow shutdown steps (usage save, RTC write, `sync; poweroff`) and is also used by auto power-off.
+* **Settings > System > Shut down player** is the last row, with a Cancel / Shut down confirmation.
+* **Power key held:** the player owns the power key, so the UI reads the key's GPIO level directly (x2000 port E bit 31, active low, via `/dev/mem`, as the Vol-Up check at boot does). After the key has been held for `pwr_hold_ms` (default **5000 ms**, matching the player's 5 s power-off hold) the screen appears while the player's own shutdown runs. Released early and still running 3.5 s later: the screen goes away. A key still held from power-on is ignored. If the player's real hold time differs, change `pwr_hold_ms` in `diskos.conf`.
+
+### Working-mode screens
+When a mode other than Local is active, it has its own screen: a big icon (the same symbol as its Working mode orbit button), the mode name, a status line, a detail line, and two buttons, **Modes** (the picker) and **Local** (back to normal playback). Ring shows the icon in a status ring that turns while waiting and goes solid when connected; Braun shows it on a dark knob whose lamp lights when connected. It opens right after a switch settles, and Quick Settings > Working mode opens it first while a mode is active.
+| Mode | Shows |
+|---|---|
+| USB DAC | "Waiting for USB host" / "Connected", volume, sample rate if the player reports one |
+| USB storage | "Waiting for USB host" / "Connected to computer", SD card size, "Eject on the computer first" |
+| BT DAC | whether a device is connected and its name, volume |
+| BT streaming | the speaker streamed to, or "No speaker connected" |
+| AirPlay | "Ready" + "Pick the Disc on your device", or "Playing" + title and artist |
+Everything is read non-blockingly once a second while the screen is up (the Bluetooth device name through a cached background probe). The USB host state comes from the USB device controller; USB DAC sample rate and AirPlay title/artist depend on what the player reports, and a line stays blank when it doesn't.
+
+### Home: larger buttons, top-aligned
+* **Ring:** Library and Search are 56 px circles (were 48), play/pause a 68 px box with a 32 pt glyph (was 26 pt), spaced wider. All three share one top edge, so the side buttons hang from the top of the play button instead of lining up middle to middle. A 24 px Search glyph (`font_theme_24`, FontAwesome 4.7) was generated for it.
+* **Braun:** side buttons 40 px (were 32), play disc 50 px (was 38), tops aligned; the lower panel and the track text moved up 6 to 8 px to make room.
+
+### Weather
+The "tap the place to change it" hint under the forecast is gone. Tapping the place still opens the city entry; holding it still switches back to automatic. "Loading forecast..." and "Forecast unavailable" still show when they apply.
+
+### Shortcuts (swipe left from Home)
+The old Apps panel is now **Shortcuts**: up to five shortcuts orbiting a Back hub, each chosen in **Settings › Display › Shortcuts**. The choices are Weather, Immersive, Equalizer, Folders, Lyrics, Queue, Audiobooks, Search, Battery, Song Info, Last.fm, All apps, or any installed homebrew app. Slots can also be left empty. The defaults are Weather, Equalizer, Folders, Immersive and All apps. **All apps** shows the full app orbit (Last.fm, every homebrew app, Settings), so no app becomes unreachable.
+
+### Themes: Ring and Braun (Settings › Display › Theme)
+The UI now has two themes. **Ring** is everything described below, and stays the default. **Braun** is a 70s Braun / Dieter Rams look: warm off-white, a speaker-grille dot texture, dark-grey knobs, a solid lower "segment" panel that follows the round edge, Inter type (converted to LVGL fonts, with the international fonts as fallback), and one orange accent that means only "on / primary / focused". Switching themes restarts the UI in place, in about 2–3 s.
+* **Home:** a Braun wall clock whose hands move. The weather sits in a window at 3 o'clock. The track, Library, play/pause and Search are on the segment, and the battery is a thin black arc on the top rim.
+* **Now Playing:** the cover on its own panel inside an orange progress ring. The title, artist, times and controls are on the segment, with an orange play button and grey heart and play-mode icons.
+* **Volume:** a dark scale band along the right rim with light marks, an orange needle and a large number box. Behaviour is unchanged: drag it, and it hides itself, or tap the middle to close it.
+* **Standby:** the clock enlarged with hour marks only, the weather window, and the track on the segment, all dimmed. It redraws once a minute.
+* **Menus:** Quick Settings, Settings, Working mode, Apps and the Now Playing options are dark knobs on panel discs. An active item gets an orange pointer and a lamp.
+* **Lists:** Library, playlists, folders, the queue, Settings, Wi-Fi and Bluetooth use straight rows with thin rules, dark and grey type, and a single orange dot for the playing, connected or focused item. There are no position dots, and the list sits on the segment.
+* **Wi-Fi and Bluetooth:** a status knob whose pointer turns orange and lamp lights when connected or on, with a Braun sliding switch.
+* **Equalizer:** a fader bank of ten slots with dark caps and a lamp over the selected band. The value and −/+ knobs are on the segment. Built-in presets show grey caps.
+* **Toast and rescan:** an off-white toast with an orange lamp. The rescan indicator is an orange lamp stepping round the rim.
+* **Song Info and Weather:** Braun face and colours.
+* **Lyrics:** the lyrics sit on the off-white segment in dark Inter.
+* **Volume:** an orange needle line crosses the scale band at the current level.
+* **Battery & usage:** a smaller dial on the grille. The battery level is a grey fill traced by a thin black line, with screen-on in grey, playing in orange, and an orange dot for now. The percentage sits inside the dial; the details, legend and day navigation are on the lower segment.
+* **Also Braun:** search and the keyboard, dialogs, the long-press menus, Accent colour, Audiobooks and Chapters.
+* **Under the hood:** colours are theme tokens looked up in the active theme's palette. These screens no longer hard-code interface colours, so a theme applies by construction. Ring renders were verified pixel-identical before and after the change.
+
+### Text
+* **Typographic punctuation:** curly apostrophes and quotes, the ellipsis, dashes and the middle dot, found in track titles, lyrics and messages, now render in both themes. Inter sits in the font chain between Montserrat and the international fonts; before, these showed as boxes.
+* **Lyrics are larger:** the Lyrics screen goes from 16 to 20 px with more line spacing, and the immersive view's lyrics are one step larger.
 
 ### Layout refinements
 * **Standby (Ring):**
@@ -361,10 +452,16 @@ A third Now Playing style, **Poster**, is added next to Cover and Vinyl (Setting
 * **Embedded lyrics:** host tests cover ID3v2.3 Latin-1 with a 600 KB cover, ID3v2.4 UTF-16 with LRC timestamps, SYLT, FLAC `LYRICS` after a 400 KB picture block, FLAC `UNSYNCEDLYRICS`, and files with no lyrics.
 * **Timed lyrics:** host tests cover a sidecar `.lrc` with metadata tags, a repeated-chorus line and mixed `[mm:ss]`/`[mm:ss.xx]` stamps, embedded UTF-16 LRC, and FLAC LRC. Untimed or missing lyrics return nothing.
 * **Now Playing:** rendered from the real `ui.c` in Poster, long-title and immersive modes, and Cover style checked to restore unchanged.
-* **Screenshots:** every screenshot is rendered from this code with the real LVGL build.
+* **Screenshots:** every screenshot is rendered from this code with the real LVGL build, by the host harness saved in `docs/fork/render-harness/` (re-running it reproduces the images byte for byte). The track, cover, battery, weather and volume in them are invented test data.
+* **This build (rescan confirm, brightness, shutdown, mode screens, Home buttons):** compiled clean, checked with cppcheck (one false positive in upstream Bluetooth list code), reviewed for thread safety and timers, rebuilt from a fresh upstream checkout + the patch to the identical binary. **None of it has been run on the device yet.**
 * **Build:** clean, apart from two unused-function warnings in `home.c` that upstream already has.
 
 ## Known limitations
+* **EQ built-in presets (Jazz, Rock, ...) show flat** on the round equalizer: the player's `PEQ` table holds nothing usable for presets 0 to 10 (rows 0 to 6 are `(null)`, 7 to 10 absent), so the curves live inside the player or in `equalizer.json`. Showing their values needs that file or the firmware.
+* **Power-key hold time** is 5 s (`pwr_hold_ms`), matching the player's power-off hold; not yet checked on the device.
+* **Bluetooth:** the freeze with a switched-on, unconnected paired speaker has a new fix that is untested on the device (see above); the earlier threaded attempt had broken playback.
+* **Ring Home:** around mid-track the cover disc riding the ring passes just above the larger pause glyph and can touch it.
+* **Hardware skip buttons** bypass the up-next queue.
 * **Quick Settings:** upstream's user-configurable tiles are removed in favour of the fixed panel.
 * **Curved lists:** applied to Library lists only.
 * **New work modes:** AirPlay and BT streaming were verified on one device, V2.40.

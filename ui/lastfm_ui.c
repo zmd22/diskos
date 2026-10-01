@@ -12,6 +12,7 @@
  * A 500ms timer rebuilds the body only when the state signature changes, and stops the
  * setup web server whenever we leave the screen. Round-screen-aware header (clear corners). */
 #include "screens.h"
+#include "theme.h"
 #include "lastfm.h"
 #include <stdio.h>
 #include <string.h>
@@ -80,7 +81,7 @@ static void rebuild(void){
         lv_obj_t *rl = lv_label_create(row);
         lv_label_set_text(rl, "Scrobbling");
         lv_obj_set_style_text_font(rl, &lv_font_montserrat_18, 0);
-        lv_obj_set_style_text_color(rl, lv_color_hex(0xC7C7CC), 0);
+        lv_obj_set_style_text_color(rl, lv_color_hex(TH_SOFT), 0);
         lv_obj_t *sw = lv_switch_create(row);
         if(lastfm_enabled()) lv_obj_add_state(sw, LV_STATE_CHECKED);
         lv_obj_set_style_bg_color(sw, lv_color_hex(0xD51007), LV_PART_INDICATOR | LV_STATE_CHECKED);

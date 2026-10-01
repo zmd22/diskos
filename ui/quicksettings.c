@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "braun.h"
 #include "theme.h"
 #include "orbit.h"
 #include "ipc.h"
@@ -54,6 +55,7 @@ static void paint_radios(void){
     orbit_set_on(&g_orb, T_BT, bs == BT_ON, acc);
     orbit_set_pending(&g_orb, bs == BT_TURNING_ON ? T_BT : -1, acc);   /* ringed while it comes up */
 }
+static void rescan_go(void){ ui_rescan_library(); ui_toast("Rescan requested"); rescan_show(1); }
 static void pick_cb(int i){                                       /* short taps */
     switch(i){
         case T_WIFI: { int on = wifi_toggle(); orbit_set_on(&g_orb, T_WIFI, on, lv_color_hex(TH_ACCENT));
@@ -61,7 +63,8 @@ static void pick_cb(int i){                                       /* short taps 
         case T_BT:   { int on = bt_toggle(); paint_radios();
                        ui_toast(on ? "Turning on Bluetooth\xE2\x80\xA6" : "Bluetooth off"); } break;
         case T_LIB:    screen_show(SCR_LIBRARY); break;
-        case T_RESCAN: ui_rescan_library(); ui_toast("Rescan requested"); rescan_show(1); break;
+        case T_RESCAN: if(scanner_active()){ ui_toast("Already scanning"); break; }
+                       fileops_confirm("Rescan library?", "Looks for new and changed music", "Rescan", rescan_go); break;
         case T_MODE:   modes_open(); break;
         case T_SET:    screen_show(SCR_SETTINGS); break;
     }
@@ -86,7 +89,7 @@ static void rescan_show(int on){
     g_scanning = on;
     lv_obj_t *ic = g_orb.icon[T_RESCAN];
     lv_anim_delete(ic, spin_exec);
-    lv_obj_set_style_text_color(ic, lv_color_hex(on ? TH_ACCENT : TH_TXT1), 0);
+    lv_obj_set_style_text_color(ic, lv_color_hex(on ? TH_ACCENT : (th_braun() ? BR_KNOB_IC : TH_TXT1)), 0);
     if(g_orb.cap[T_RESCAN]){ lv_label_set_text(g_orb.cap[T_RESCAN], on ? "Scanning" : "Rescan");
                             lv_obj_set_style_text_color(g_orb.cap[T_RESCAN], lv_color_hex(on ? TH_TXT1 : TH_TXT2), 0); }
     if(on){
@@ -105,7 +108,7 @@ static void batt_set_low(int low){
     if(!g_batt || low == g_batt_low) return;
     g_batt_low = low;
     lv_anim_delete(g_batt, batt_pulse);
-    lv_obj_set_style_arc_color(g_batt, lv_color_hex(low ? TH_ACCENT : TH_TXT1), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(g_batt, lv_color_hex(th_braun() ? (low ? BR_ACC : BR_TXT) : (low ? TH_ACCENT : TH_TXT1)), LV_PART_INDICATOR);
     lv_obj_set_style_arc_opa(g_batt, LV_OPA_COVER, LV_PART_INDICATOR);
     if(low){
         lv_anim_t a; lv_anim_init(&a);
@@ -144,10 +147,10 @@ void quicksettings_create(lv_obj_t *root)
     lv_arc_set_range(g_bright, 4, 40);
     lv_arc_set_value(g_bright, ui_get_brightness());
     lv_obj_set_style_arc_width(g_bright, QS_ARC_W, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(g_bright, lv_color_hex(TH_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(g_bright, lv_color_hex(th_braun() ? BR_SURF : TH_TRACK), LV_PART_MAIN);
     lv_obj_set_style_arc_rounded(g_bright, true, LV_PART_MAIN);
     lv_obj_set_style_arc_width(g_bright, QS_ARC_W, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(g_bright, lv_color_hex(TH_TXT1), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(g_bright, lv_color_hex(th_braun() ? BR_TXT : TH_TXT1), LV_PART_INDICATOR);
     lv_obj_set_style_arc_rounded(g_bright, true, LV_PART_INDICATOR);
     lv_obj_add_event_cb(g_bright, bright_change_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(g_bright, bright_release_cb, LV_EVENT_RELEASED, NULL);
@@ -171,7 +174,7 @@ void quicksettings_create(lv_obj_t *root)
     lv_arc_set_mode(g_batt, LV_ARC_MODE_REVERSE);
     lv_arc_set_range(g_batt, 0, 100);
     lv_obj_set_style_arc_width(g_batt, QS_ARC_W, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(g_batt, lv_color_hex(TH_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(g_batt, lv_color_hex(th_braun() ? BR_SURF : TH_TRACK), LV_PART_MAIN);
     lv_obj_set_style_arc_rounded(g_batt, true, LV_PART_MAIN);
     lv_obj_set_style_arc_width(g_batt, QS_ARC_W, LV_PART_INDICATOR);
     lv_obj_set_style_arc_rounded(g_batt, true, LV_PART_INDICATOR);
@@ -203,10 +206,10 @@ void quicksettings_create(lv_obj_t *root)
     lv_arc_set_bg_angles(g_prog, 0, 360);
     lv_arc_set_range(g_prog, 0, 1000);
     lv_obj_set_style_arc_width(g_prog, TH_ARC_IND, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(g_prog, lv_color_hex(TH_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(g_prog, lv_color_hex(th_braun() ? BR_SURF : TH_TRACK), LV_PART_MAIN);
     lv_obj_set_style_arc_width(g_prog, TH_ARC_IND, LV_PART_INDICATOR);
     lv_obj_set_style_arc_rounded(g_prog, true, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(g_prog, ui_media_accent(), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(g_prog, th_braun() ? lv_color_hex(BR_ACC) : ui_media_accent(), LV_PART_INDICATOR);
     g_cover_clip = lv_button_create(root);
     lv_obj_remove_style_all(g_cover_clip);
     lv_obj_set_size(g_cover_clip, ORBIT_HUB, ORBIT_HUB);
@@ -241,6 +244,10 @@ void quicksettings_create(lv_obj_t *root)
     lv_obj_center(g_pp_glyph);
 
     if(!g_prog_timer) g_prog_timer = lv_timer_create(prog_tick, 1000, NULL);
+    if(th_braun()){ br_face(root); if(g_dim) lv_obj_add_flag(g_dim, LV_OBJ_FLAG_HIDDEN);   /* Braun: the grille face, no dimming veil */
+                    lv_obj_set_style_text_color(g_batt_icon, lv_color_hex(BR_TXT2), 0);
+                    for(uint32_t k = 0; k < lv_obj_get_child_count(root); k++){ lv_obj_t *o = lv_obj_get_child(root, k);   /* the sun marker */
+                        if(lv_obj_check_type(o, &lv_label_class) && lv_obj_get_style_text_font(o, 0) == &font_icons_28) lv_obj_set_style_text_color(o, lv_color_hex(BR_TXT2), 0); } }
 }
 
 /* the cover (RAM decode, scaled into the hub) and the blurred backdrop; called on track / art changes */
@@ -260,10 +267,10 @@ void quicksettings_set_art(const void *cover_dsc, const void *backdrop_src)
         lv_obj_remove_flag(g_cover_note, LV_OBJ_FLAG_HIDDEN);
     }
     lv_image_set_src(g_bg, NULL);
-    if(backdrop_src){ lv_image_set_src(g_bg, backdrop_src); lv_obj_remove_flag(g_bg, LV_OBJ_FLAG_HIDDEN); }
+    if(backdrop_src && !th_braun()){ lv_image_set_src(g_bg, backdrop_src); lv_obj_remove_flag(g_bg, LV_OBJ_FLAG_HIDDEN); }   /* Braun: the grille, no album wash */
     else lv_obj_add_flag(g_bg, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_bg_color(g_cover_clip, ui_media_accent(), 0);
-    lv_obj_set_style_arc_color(g_prog, ui_media_accent(), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(g_prog, th_braun() ? lv_color_hex(BR_ACC) : ui_media_accent(), LV_PART_INDICATOR);
 }
 void quicksettings_set_battery(int pct, int charging)
 {
@@ -283,7 +290,7 @@ void quicksettings_set_now_playing(const char *title, const char *artist, int pl
 {
     (void)title; (void)artist;
     if(g_pp_glyph) lv_label_set_text(g_pp_glyph, playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
-    if(g_prog) lv_obj_set_style_arc_color(g_prog, ui_media_accent(), LV_PART_INDICATOR);
+    if(g_prog) lv_obj_set_style_arc_color(g_prog, th_braun() ? lv_color_hex(BR_ACC) : ui_media_accent(), LV_PART_INDICATOR);
 }
 void quicksettings_set_volume(int vol){ (void)vol; }       /* the volume arc gave way to the battery */
 void quicksettings_refresh(int playing)

@@ -7,6 +7,7 @@
 #include "screens.h"
 #include "theme.h"
 #include "scanner.h"
+#include "braun.h"
 #include <math.h>
 #include <string.h>
 
@@ -27,9 +28,11 @@ void ui_toast_icon(const char *icon, lv_color_t icol, const char *msg)
 
     g_toast = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(g_toast);
-    lv_obj_set_style_bg_color(g_toast, lv_color_hex(0x18181A), 0);
+    int br = th_braun();                                       /* Braun: an off-white panel, dark text, an orange lamp */
+    lv_obj_set_style_bg_color(g_toast, lv_color_hex(br ? BR_PANEL : 0x18181A), 0);
     lv_obj_set_style_bg_opa(g_toast, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(g_toast, lv_color_hex(0x38383C), 0);
+    lv_obj_set_style_border_color(g_toast, lv_color_hex(br ? 0xC4BEB4 : 0x38383C), 0);
+    if(br){ lv_obj_set_style_shadow_color(g_toast, lv_color_hex(0x9C968C), 0); lv_obj_set_style_shadow_width(g_toast, 10, 0); lv_obj_set_style_shadow_offset_y(g_toast, 2, 0); }
     lv_obj_set_style_border_width(g_toast, 1, 0);
     lv_obj_set_style_radius(g_toast, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_pad_hor(g_toast, 16, 0);
@@ -42,18 +45,25 @@ void ui_toast_icon(const char *icon, lv_color_t icol, const char *msg)
     lv_obj_clear_flag(g_toast, LV_OBJ_FLAG_CLICKABLE);       /* let touches pass through */
     lv_obj_clear_flag(g_toast, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *ic = lv_label_create(g_toast);
-    lv_label_set_text(ic, icon ? icon : LV_SYMBOL_BULLET);
-    lv_obj_set_style_text_font(ic, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(ic, icol, 0);
+    if(!icon || !strcmp(icon, LV_SYMBOL_BULLET)){              /* the default mark: a small drawn dot (no glyph needed) */
+        lv_obj_t *lamp = lv_obj_create(g_toast); lv_obj_remove_style_all(lamp); lv_obj_set_size(lamp, 8, 8);
+        lv_obj_set_style_radius(lamp, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_bg_color(lamp, br ? lv_color_hex(BR_ACC) : icol, 0); lv_obj_set_style_bg_opa(lamp, LV_OPA_COVER, 0);
+    } else {
+        lv_obj_t *ic = lv_label_create(g_toast);
+        lv_label_set_text(ic, icon ? icon : LV_SYMBOL_BULLET);
+        lv_obj_set_style_text_font(ic, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(ic, br ? lv_color_hex(BR_ACC) : icol, 0);
+    }
 
     lv_obj_t *l = lv_label_create(g_toast);
     lv_label_set_text(l, msg);
     lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_max_width(l, 172, 0);                   /* the pill stays inside the upper chord */
     lv_obj_set_width(l, LV_SIZE_CONTENT);
-    lv_obj_set_style_text_font(l, ui_font_cjk(14), 0);       /* some toasts embed a filename/name */
-    lv_obj_set_style_text_color(l, lv_color_hex(TH_TXT1), 0);
+    static lv_font_t tf; static int tf_init;                   /* Montserrat -> Inter (has \xC2\xB7 \xE2\x80\x9C \xE2\x80\xA6) -> the international fonts */
+    if(!tf_init){ tf = lv_font_montserrat_14; tf.fallback = br_font(14, 0); tf_init = 1; }
+    lv_obj_set_style_text_font(l, br ? br_font(14, 0) : &tf, 0);   /* some toasts embed a filename/name */
+    lv_obj_set_style_text_color(l, lv_color_hex(br ? BR_TXT : TH_TXT1), 0);
 
     g_toast_timer = lv_timer_create(toast_hide_cb, 2400, NULL);
 }
@@ -68,6 +78,7 @@ static int g_orb_on;
 static uint32_t g_orb_t0;
 static void orb_place(void){
     float a0 = (float)lv_tick_elaps(g_orb_t0) * 0.18f - 90.0f;      /* one lap every 2 s */
+    if(th_braun()) a0 = (float)((int)(a0 / 7.5f)) * 7.5f;           /* Braun: steps, like an indicator lamp */
     for(int k = 0; k < ORB_N; k++){
         float a = (a0 - k * 3.4f) * 0.0174533f;
         int sz = lv_obj_get_width(g_orb[k]);
@@ -92,7 +103,8 @@ void ui_scan_orbit(int on){
         }
     }
     for(int k = 0; k < ORB_N; k++){
-        lv_obj_set_style_bg_color(g_orb[k], k == 0 ? lv_color_hex(0xFFFFFF) : ui_current_accent(), 0);
+        if(th_braun()) lv_obj_set_style_bg_color(g_orb[k], lv_color_hex(k == 0 ? BR_ACC : 0x8E897F), 0);
+        else lv_obj_set_style_bg_color(g_orb[k], k == 0 ? lv_color_hex(0xFFFFFF) : ui_current_accent(), 0);
         if(on) lv_obj_remove_flag(g_orb[k], LV_OBJ_FLAG_HIDDEN); else lv_obj_add_flag(g_orb[k], LV_OBJ_FLAG_HIDDEN);
     }
     if(on){

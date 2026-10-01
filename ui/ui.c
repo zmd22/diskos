@@ -10,6 +10,7 @@
 #include "artcache.h"   /* persistent decoded-cover cache on SD */
 #include "config.h"
 #include "screens.h"
+#include "braun.h"
 #include "theme.h"
 #include "anim.h"
 #include "fonts_intl.h"   /* Cyrillic/Greek/Latin-ext fallback (issue #3) */
@@ -46,6 +47,7 @@ LV_FONT_DECLARE(font_icons_28)
 #define COVER_D      148
 
 static lv_obj_t *backdrop;
+static lv_obj_t *g_np_scr, *g_br_seg, *g_br_disc;   /* Braun: the Now Playing root, its lower segment, the cover's panel */
 static lv_obj_t *ring;
 static lv_obj_t *cover;
 static lv_obj_t *cover_img;
@@ -702,8 +704,8 @@ static void np_accent_from_track(const char *path){
     np_acc_set = (rgb && np_rgb_vivid(rgb));
     if(np_acc_set) np_acc = lv_color_hex(rgb);
 }
-static lv_color_t np_col(void){ return ((g_np_poster || g_np_ring) && np_acc_set) ? np_acc : accent; }
-lv_color_t ui_media_accent(void){ return np_acc_set ? np_acc : accent; }   /* theme.h: media surfaces */
+static lv_color_t np_col(void){ if(th_braun()) return lv_color_hex(BR_ACC); return ((g_np_poster || g_np_ring) && np_acc_set) ? np_acc : accent; }
+lv_color_t ui_media_accent(void){ if(th_braun()) return lv_color_hex(BR_ACC); return np_acc_set ? np_acc : accent; }   /* theme.h: media surfaces (Braun: orange) */
 static void apply_accent(void)
 {
     if(ring) {
@@ -717,7 +719,7 @@ static void apply_accent(void)
     }
 
     if(btn_pp) {
-        lv_obj_set_style_text_color(btn_pp, np_col(), LV_PART_MAIN);
+        lv_obj_set_style_text_color(btn_pp, th_braun() ? lv_color_hex(0xFFFFFF) : np_col(), LV_PART_MAIN);   /* Braun: white on the orange button */
     }
 
     if(fav_icon && g_np_fav) {
@@ -740,9 +742,10 @@ static void apply_accent(void)
 
 /* the live accent (user-picked static, or the album-derived dynamic colour). Other
  * modules paint with this instead of a hardcoded constant. */
-lv_color_t ui_current_accent(void){ return accent; }
+lv_color_t ui_current_accent(void){ return th_braun() ? lv_color_hex(BR_ACC) : accent; }   /* Braun: orange everywhere */
 
 /* ---- shared standard header (back chevron + centred title) ------------------------------------- */
+static void ui_header_home_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED && screen_press_was_long()) screen_home(); }
 static void ui_header_back_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED) screen_back(); }
 /* full form: custom back handler (e.g. Library pops its view stack before leaving the screen). */
 lv_obj_t *ui_header_cb(lv_obj_t *root, const char *title, lv_event_cb_t back_cb)
@@ -755,6 +758,7 @@ lv_obj_t *ui_header_cb(lv_obj_t *root, const char *title, lv_event_cb_t back_cb)
     lv_obj_set_style_bg_color(back, lv_color_hex(0x1C1C1E), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(back, LV_OPA_70, LV_STATE_PRESSED);
     lv_obj_add_event_cb(back, back_cb ? back_cb : ui_header_back_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(back, ui_header_home_cb, LV_EVENT_CLICKED, NULL);   /* runs AFTER the screen's own back: a long press then goes Home (covers back arrows that step up inside a screen, e.g. Library, Files) */
     lv_obj_t *ic = lv_label_create(back);
     lv_label_set_text(ic, LV_SYMBOL_LEFT);
     lv_obj_set_style_text_font(ic, &lv_font_montserrat_20, 0);
@@ -770,6 +774,11 @@ lv_obj_t *ui_header_cb(lv_obj_t *root, const char *title, lv_event_cb_t back_cb)
     lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_font(t, ui_font_cjk(18), 0);   /* headers show folder/album/playlist names: chain (issue #3) */
     lv_obj_set_style_text_color(t, lv_color_hex(0xFFFFFF), 0);
+    if(th_braun()){                                           /* Braun: dark title, grey arrow, on the grille */
+        lv_obj_set_style_text_color(ic, lv_color_hex(BR_TXT2), 0);
+        lv_obj_set_style_bg_color(back, lv_color_hex(BR_SURF), LV_STATE_PRESSED);
+        lv_obj_set_style_text_color(t, lv_color_hex(BR_TXT), 0); lv_obj_set_style_text_font(t, br_font(18, 1), 0);
+    }
     return t;
 }
 lv_obj_t *ui_header(lv_obj_t *root, const char *title){ return ui_header_cb(root, title, NULL); }
@@ -784,7 +793,7 @@ static void fav_refresh(int on, int have)
     if(have) lv_obj_remove_flag(btn_fav, LV_OBJ_FLAG_HIDDEN);
     else     lv_obj_add_flag(btn_fav, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(fav_icon, HEART_FILLED);                     /* theme: solid, colour carries the state */
-    lv_obj_set_style_text_color(fav_icon, on ? np_col() : lv_color_hex((g_np_poster || g_np_ring) ? TH_TXT1 : C_TERTIARY), LV_PART_MAIN);
+    lv_obj_set_style_text_color(fav_icon, on ? np_col() : lv_color_hex(th_braun() ? BR_TXT2 : (g_np_poster || g_np_ring) ? TH_TXT1 : C_TERTIARY), LV_PART_MAIN);
 }
 
 static void fav_click_cb(lv_event_t *e)
@@ -828,7 +837,7 @@ static void mode_refresh(int wm)
                      : (wm == 2 || wm == 3) ? LV_SYMBOL_LOOP
                      : MODE_ARROW;                       /* 0 and 4 use the arrow */
     lv_label_set_text(mode_icon, icon);
-    lv_obj_set_style_text_color(mode_icon, wm ? accent : lv_color_hex(C_TERTIARY), LV_PART_MAIN);
+    lv_obj_set_style_text_color(mode_icon, wm ? (th_braun() ? lv_color_hex(BR_ACC) : accent) : lv_color_hex(th_braun() ? BR_TXT2 : C_TERTIARY), LV_PART_MAIN);
     if(wm == 2 || wm == 4) lv_obj_remove_flag(mode_one, LV_OBJ_FLAG_HIDDEN);
     else                   lv_obj_add_flag(mode_one, LV_OBJ_FLAG_HIDDEN);
 }
@@ -886,6 +895,7 @@ void ui_vinyl_spin(int want)
 /* Now Playing style: 0 = album cover (rounded square), 1 = vinyl disc. */
 static void np_layout(int poster);
 static void np_layout_ring(int on);
+static void np_layout_braun(void);
 static lv_timer_t *g_settle_t;
 static void np_settle_cb(lv_timer_t *t){                  /* after 15 s: stop scrolling, end with "..." */
     (void)t;
@@ -931,8 +941,10 @@ void ui_set_np_style(int style)
         ui_vinyl_spin(0);                                  /* stop the spin */
         if(cover_img) lv_image_set_rotation(cover_img, 0); /* Cover must sit upright */
     }
+    if(th_braun()){ g_np_poster = 0; g_np_ring = 1; g_np_vinyl = 0; }   /* Braun: its own layout, built on Ring's structure */
     np_layout(g_np_poster);
     np_layout_ring(g_np_ring);
+    np_layout_braun();
     np_queue_place();
     apply_accent();
     ui_np_rescroll();
@@ -993,6 +1005,48 @@ static void np_layout_ring(int on){
     if(t_remain){  lv_obj_set_style_text_font(t_remain, TH_F_CAPTION, 0); lv_obj_set_style_text_color(t_remain, tc, 0);
                    lv_obj_align(t_remain, LV_ALIGN_TOP_MID, 108, 294); }
     SHOW(t_sep, 0);
+}
+/* Braun Now Playing: the grille face, the cover on its own panel disc inside an orange progress ring, and
+ * the lower segment holding the title, artist, times and controls (Previous / Next as flat discs, play in
+ * orange). Everything else keeps its Ring position; colours follow the Braun palette. */
+static void np_layout_braun(void){
+    if(!th_braun() || !g_np_scr) return;
+    if(!g_br_seg){
+        br_face(g_np_scr);
+        if(backdrop) lv_obj_add_flag(backdrop, LV_OBJ_FLAG_HIDDEN);
+        g_br_disc = br_disc(g_np_scr, 180, RING_Y, RING_RR + 8, BR_PANEL);
+        g_br_seg = br_segment(g_np_scr, 214);
+        lv_obj_move_to_index(g_br_disc, 1); lv_obj_move_to_index(g_br_seg, 2);   /* above the grille, below everything else */
+    }
+    if(ring){ lv_obj_set_style_arc_color(ring, lv_color_hex(BR_SURF), LV_PART_MAIN); lv_obj_set_style_arc_width(ring, 5, LV_PART_MAIN);
+              lv_obj_set_style_arc_width(ring, 5, LV_PART_INDICATOR); }
+    if(title){ lv_obj_set_style_text_font(title, br_font(22, 1), 0); lv_obj_set_style_text_color(title, lv_color_hex(BR_TXT), 0);
+               lv_obj_set_width(title, 260); lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 226); }
+    if(artist){ lv_obj_set_style_text_font(artist, br_font(14, 0), 0); lv_obj_set_style_text_color(artist, lv_color_hex(BR_TXT2), 0);
+                lv_obj_set_width(artist, 240); lv_obj_align(artist, LV_ALIGN_TOP_MID, 0, 254); }
+    if(np_mid_btn){ lv_obj_set_size(np_mid_btn, 260, 52); lv_obj_align(np_mid_btn, LV_ALIGN_TOP_MID, 0, 222); }
+    lv_obj_t *side[2] = { btn_prev, btn_next };
+    for(int i = 0; i < 2; i++) if(side[i]){
+        lv_obj_set_style_text_color(side[i], lv_color_hex(BR_TXT), 0); lv_obj_set_style_text_font(side[i], &lv_font_montserrat_16, 0);
+        lv_obj_set_style_bg_color(side[i], lv_color_hex(BR_SURF), 0); lv_obj_set_style_bg_opa(side[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(side[i], LV_RADIUS_CIRCLE, 0); lv_obj_set_style_pad_all(side[i], 8, 0);
+        lv_obj_align(side[i], LV_ALIGN_TOP_MID, i ? 54 : -54, 284);
+    }
+    if(btn_pp){ lv_obj_set_style_text_font(btn_pp, &lv_font_montserrat_24, 0); lv_obj_set_style_text_color(btn_pp, lv_color_hex(0xFFFFFF), 0);
+                lv_obj_set_style_bg_color(btn_pp, lv_color_hex(BR_ACC), 0); lv_obj_set_style_bg_opa(btn_pp, LV_OPA_COVER, 0);
+                lv_obj_set_style_radius(btn_pp, LV_RADIUS_CIRCLE, 0); lv_obj_set_style_pad_all(btn_pp, 0, 0);
+                lv_obj_set_size(btn_pp, 50, 50); lv_obj_set_style_text_align(btn_pp, LV_TEXT_ALIGN_CENTER, 0);
+                lv_obj_set_style_pad_top(btn_pp, (50 - lv_font_get_line_height(&lv_font_montserrat_24)) / 2, 0);   /* a round button, glyph centred */
+                lv_obj_align(btn_pp, LV_ALIGN_TOP_MID, 0, 276); }
+    lv_color_t tc = lv_color_hex(BR_TXT2);
+    if(t_elapsed){ lv_obj_set_style_text_font(t_elapsed, br_font(12, 0), 0); lv_obj_set_style_text_color(t_elapsed, tc, 0); lv_obj_align(t_elapsed, LV_ALIGN_TOP_MID, -104, 294); }
+    if(t_remain){  lv_obj_set_style_text_font(t_remain,  br_font(12, 0), 0); lv_obj_set_style_text_color(t_remain,  tc, 0); lv_obj_align(t_remain,  LV_ALIGN_TOP_MID,  104, 294); }
+    for(int i = 0; i < 2; i++) if(np_dots[i]){ lv_obj_set_style_bg_color(np_dots[i], lv_color_hex(i == 0 ? BR_TXT : BR_TXT3), 0); lv_obj_set_style_bg_opa(np_dots[i], LV_OPA_COVER, 0); }   /* dark page dots */
+    if(btn_sleep){ lv_obj_t *sl = lv_obj_get_child(btn_sleep, 0); if(sl) lv_obj_set_style_text_color(sl, lv_color_hex(BR_TXT2), 0); }
+    if(fav_icon && !g_np_fav) lv_obj_set_style_text_color(fav_icon, lv_color_hex(BR_TXT2), 0);
+    if(mode_icon && g_np_mode == 0) lv_obj_set_style_text_color(mode_icon, lv_color_hex(BR_TXT2), 0);
+    if(btn_queue){ for(uint32_t k = 0; k < lv_obj_get_child_count(btn_queue); k++){ lv_obj_t *c = lv_obj_get_child(btn_queue, k);
+                     if(lv_obj_check_type(c, &lv_label_class) && lv_obj_get_child_count(c) == 0 && k == 0) lv_obj_set_style_text_color(c, lv_color_hex(BR_TXT2), 0); } }
 }
 static void np_layout(int poster){
     SHOW(poster_img, poster); poster_shading_live(poster && !g_poster_baked);
@@ -1422,7 +1476,7 @@ static void apply_art(const art_req_t *job)
         lv_image_set_src(backdrop, backdrop_src);
         lv_obj_remove_flag(backdrop, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_background(backdrop);
-        if(g_np_poster) lv_obj_add_flag(backdrop, LV_OBJ_FLAG_HIDDEN);   /* the sharp poster replaces it */
+        if(g_np_poster || th_braun()) lv_obj_add_flag(backdrop, LV_OBJ_FLAG_HIDDEN);   /* the sharp poster replaces it; Braun: the grille */
     }
     if(g_np_poster) poster_reload();                     /* only the Poster shows it; immersive decodes on open */
     else g_poster_stale = 1;
@@ -1941,6 +1995,7 @@ const char *ui_current_backdrop_src(void)
  * We keep mutable copies because .fallback must be set on non-const fonts. */
 static lv_font_t s_font28, s_font24, s_font20, s_font18, s_font16, s_font14;      /* Montserrat, chain heads */
 static lv_font_t s_intl20, s_intl18, s_intl16, s_intl14;      /* intl link (fallback -> Source Han) */
+extern const lv_font_t font_inter_medium_14, font_inter_medium_16, font_inter_bold_18, font_inter_bold_22;
 static void ui_fonts_init(void)
 {
     if(s_font20.get_glyph_dsc) return;   /* once */
@@ -1948,12 +2003,19 @@ static void ui_fonts_init(void)
     s_intl18 = font_intl_18; s_intl18.fallback = &lv_font_source_han_16_cjk;
     s_intl16 = font_intl_16; s_intl16.fallback = &lv_font_source_han_16_cjk;
     s_intl14 = font_intl_14; s_intl14.fallback = &lv_font_source_han_16_cjk;
-    s_font28 = lv_font_montserrat_28; s_font28.fallback = &s_intl20;   /* poster title */
-    s_font24 = lv_font_montserrat_24; s_font24.fallback = &s_intl20;   /* ring title */
-    s_font20 = lv_font_montserrat_20; s_font20.fallback = &s_intl20;
-    s_font18 = lv_font_montserrat_18; s_font18.fallback = &s_intl18;
-    s_font16 = lv_font_montserrat_16; s_font16.fallback = &s_intl16;
-    s_font14 = lv_font_montserrat_14; s_font14.fallback = &s_intl14;
+    /* Inter sits between Montserrat and the international fonts: it has the typographic punctuation that
+     * track titles and lyrics often carry (\u2019 \u2018 \u201C \u201D \u2026 \u2013 \u2014 \u00B7), which the other two lack. */
+    static lv_font_t p22, p18, p16, p14;
+    p22 = font_inter_bold_22;   p22.fallback = &s_intl20;
+    p18 = font_inter_bold_18;   p18.fallback = &s_intl18;
+    p16 = font_inter_medium_16; p16.fallback = &s_intl16;
+    p14 = font_inter_medium_14; p14.fallback = &s_intl14;
+    s_font28 = lv_font_montserrat_28; s_font28.fallback = &p22;   /* poster title */
+    s_font24 = lv_font_montserrat_24; s_font24.fallback = &p22;   /* ring title */
+    s_font20 = lv_font_montserrat_20; s_font20.fallback = &p22;
+    s_font18 = lv_font_montserrat_18; s_font18.fallback = &p18;
+    s_font16 = lv_font_montserrat_16; s_font16.fallback = &p16;
+    s_font14 = lv_font_montserrat_14; s_font14.fallback = &p14;
 }
 
 /* Public accessor for the fallback-chained text font (Montserrat -> intl -> CJK) so other screens
@@ -2007,6 +2069,7 @@ void ui_create(lv_obj_t *root)
     lv_obj_set_style_bg_color(scr, lv_color_hex(C_BLACK), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
 
+    g_np_scr = scr;
     /* full-screen blurred album-art backdrop (created first = behind everything) */
     backdrop_src[0] = '\0';
     backdrop = lv_image_create(scr);
@@ -2400,7 +2463,7 @@ void ui_create(lv_obj_t *root)
     for(int j = 0; j < 3; j++){
         imm_lyr[j] = lv_label_create(fsart);
         lv_obj_set_width(imm_lyr[j], j == 1 ? 272 : (j == 0 ? 250 : 226));  /* the circle narrows downward */
-        style_text(imm_lyr[j], j == 1 ? &s_font20 : &s_font16, lv_color_hex(j == 1 ? 0xF6F6F8 : 0xA4A4AA));
+        style_text(imm_lyr[j], j == 1 ? &s_font24 : &s_font18, lv_color_hex(j == 1 ? 0xF6F6F8 : 0xA4A4AA));
         lv_obj_set_style_text_align(imm_lyr[j], LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_long_mode(imm_lyr[j], LV_LABEL_LONG_WRAP);             /* reflow, never cut mid-line */
         lv_obj_set_style_max_height(imm_lyr[j], j == 1 ? 4 * 26 : 2 * 21, 0);   /* current up to 4 lines */
@@ -2607,12 +2670,22 @@ static void vol_hide_cb(lv_timer_t *t){
 /* Throttle volume commits to <=1 per 120ms while dragging (the arc fires
  * VALUE_CHANGED every step - sending each one hammers the player). The on-screen
  * number tracks live; the final value is always committed on RELEASED. */
+static lv_obj_t *g_vol_needle; static lv_point_precise_t g_vol_np[2];
+static void vol_needle(int v){                               /* Braun: an orange line across the band at the level */
+    if(!g_vol_needle) return;
+    if(v < 0) v = 0; if(v > VOL_MAX) v = VOL_MAX;
+    float an = (48.0f - 96.0f * v / VOL_MAX) * 0.0174533f;    /* 0 at the bottom end, 120 at the top (the scale's 48..-48 degrees) */
+    g_vol_np[0].x = 180 + 131 * cosf(an); g_vol_np[0].y = 180 + 131 * sinf(an);
+    g_vol_np[1].x = 180 + 169 * cosf(an); g_vol_np[1].y = 180 + 169 * sinf(an);
+    lv_line_set_points(g_vol_needle, g_vol_np, 2);
+}
 static void vol_arc_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
     if(g_vol_suppress) return;                       /* programmatic update, ignore */
     int v = lv_arc_get_value(g_vol_arc);
     char b[12]; snprintf(b, sizeof b, "%d", v); lv_label_set_text(g_vol_num, b);
+    vol_needle(v);
     if(code == LV_EVENT_VALUE_CHANGED){
         if(lv_tick_elaps(g_vol_last_send) >= 120){
             ui_set_volume(v); g_vol_last_send = lv_tick_get(); g_vol_pending = 0;
@@ -2694,8 +2767,63 @@ void ui_show_volume(int vol)
         lv_obj_add_flag(mid, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_ADV_HITTEST);
         lv_obj_add_event_cb(mid, vol_tap_close_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_move_to_index(mid, 0);                             /* under the arc and the badge */
+        if(th_braun()){
+            /* Braun: a dark scale band along the right rim with light markings, an orange needle, and a
+             * bigger dark number box. Same arc underneath, so dragging / auto-hide / tap-to-close are unchanged. */
+            lv_obj_set_style_bg_color(g_vol_panel, lv_color_hex(BR_BG), 0);
+            lv_obj_set_style_bg_opa(g_vol_panel, 150, 0);
+            lv_obj_set_size(g_vol_arc, 340, 340); lv_obj_center(g_vol_arc);
+            lv_arc_set_bg_angles(g_vol_arc, 312, 48);                 /* exactly the scale: the needle lands on the marks */
+            lv_obj_set_style_arc_width(g_vol_arc, 40, LV_PART_MAIN);
+            lv_obj_set_style_arc_rounded(g_vol_arc, false, LV_PART_MAIN);
+            lv_obj_set_style_arc_color(g_vol_arc, lv_color_hex(BR_KNOB), LV_PART_MAIN);
+            lv_obj_set_style_arc_opa(g_vol_arc, LV_OPA_TRANSP, LV_PART_INDICATOR);   /* no fill: a needle reads the level */
+            lv_obj_set_style_bg_color(g_vol_arc, lv_color_hex(BR_ACC), LV_PART_KNOB);
+            lv_obj_set_style_border_color(g_vol_arc, lv_color_hex(BR_ACC), LV_PART_KNOB);
+            lv_obj_set_style_border_width(g_vol_arc, 0, LV_PART_KNOB);
+            lv_obj_set_style_pad_all(g_vol_arc, -14, LV_PART_KNOB);                 /* a small orange dot on the band */
+            /* the scale: 25 marks, every 4th long, 0 / 60 / 120 in light type */
+            static lv_point_precise_t mk[25][2];
+            for(int k = 0; k < 25; k++){
+                float an = (48 - k * 4) * 0.0174533f; int major = (k % 4 == 0);
+                float r1 = major ? 155 : 159, r2 = 166;
+                mk[k][0].x = 180 + r1 * cosf(an); mk[k][0].y = 180 + r1 * sinf(an);
+                mk[k][1].x = 180 + r2 * cosf(an); mk[k][1].y = 180 + r2 * sinf(an);
+                lv_obj_t *l = lv_line_create(g_vol_panel); lv_line_set_points(l, mk[k], 2);
+                lv_obj_set_style_line_width(l, major ? 2 : 1, 0);
+                lv_obj_set_style_line_color(l, lv_color_hex(major ? 0xECE8E0 : 0x96928B), 0);
+                lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE);
+            }
+            static const char *const LB[3] = { "0", "60", "120" }; static const int LK[3] = { 0, 12, 24 };
+            for(int i = 0; i < 3; i++){
+                float an = (48 - LK[i] * 4 + (i == 0 ? -5 : i == 2 ? 5 : 0)) * 0.0174533f;   /* the end labels a little inward, onto the band */
+                lv_obj_t *l = br_label(g_vol_panel, LB[i], br_font(12, 0), 0xECE8E0);
+                lv_obj_align(l, LV_ALIGN_CENTER, (int32_t)(145 * cosf(an)), (int32_t)(145 * sinf(an)));   /* fully on the band */
+            }
+            /* the number box */
+            lv_obj_t *badge = lv_obj_get_parent(g_vol_num);
+            lv_obj_set_flex_flow(badge, LV_FLEX_FLOW_COLUMN);
+            lv_obj_set_size(badge, 118, 88);
+            lv_obj_set_style_radius(badge, 20, 0);
+            lv_obj_set_style_bg_color(badge, lv_color_hex(BR_KNOB), 0);
+            lv_obj_set_style_border_color(badge, lv_color_hex(BR_KNOB_L), 0); lv_obj_set_style_border_width(badge, 1, 0);
+            lv_obj_set_style_pad_all(badge, 0, 0); lv_obj_set_style_pad_row(badge, 0, 0);
+            lv_obj_align(badge, LV_ALIGN_CENTER, 13, 0);
+            lv_obj_t *spk = lv_obj_get_child(badge, 0);
+            lv_obj_add_flag(spk, LV_OBJ_FLAG_IGNORE_LAYOUT);
+            lv_obj_set_style_text_font(spk, &lv_font_montserrat_14, 0); lv_obj_set_style_text_color(spk, lv_color_hex(BR_ACC), 0);
+            lv_obj_align(spk, LV_ALIGN_TOP_LEFT, 12, 8);
+            lv_obj_set_style_text_font(g_vol_num, br_font(44, 1), 0); lv_obj_set_style_text_color(g_vol_num, lv_color_hex(0xF8F5EE), 0);
+            lv_obj_t *cap = br_label(badge, "VOLUME", br_font(12, 0), 0xB0ACA4);
+            (void)cap;
+            g_vol_needle = lv_line_create(g_vol_panel);                /* the orange needle across the band */
+            lv_obj_set_style_line_width(g_vol_needle, 3, 0); lv_obj_set_style_line_rounded(g_vol_needle, true, 0);
+            lv_obj_set_style_line_color(g_vol_needle, lv_color_hex(BR_ACC), 0);
+            lv_obj_clear_flag(g_vol_needle, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_move_foreground(g_vol_needle);                      /* over the band and its marks (the number box is clear of it) */
+        }
     }
-    { lv_color_t acc = ui_current_accent();                       /* follow an accent change */
+    if(!th_braun()){ lv_color_t acc = ui_current_accent();       /* follow an accent change (Braun: always orange) */
       lv_obj_set_style_arc_color(g_vol_arc, acc, LV_PART_INDICATOR);
       lv_obj_set_style_bg_color(g_vol_arc, acc, LV_PART_KNOB);
       lv_obj_set_style_text_color(lv_obj_get_child(lv_obj_get_parent(g_vol_num), 0), acc, 0); }
@@ -2706,6 +2834,7 @@ void ui_show_volume(int vol)
     if(!(lv_obj_get_state(g_vol_arc) & LV_STATE_PRESSED)){
         g_vol_suppress = 1;
         lv_arc_set_value(g_vol_arc, vol);
+        vol_needle(vol);
         g_vol_suppress = 0;
         char b[12]; snprintf(b, sizeof b, "%d", vol); lv_label_set_text(g_vol_num, b);
     }

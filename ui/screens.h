@@ -17,6 +17,9 @@ void usage_create(lv_obj_t *root);   /* Settings > Battery: the 24-hour usage di
 void usage_refresh(void);
 void usage_tick(int screen_on, int playing);        /* main loop: one sample a minute */
 void usage_note_battery(int pct, int charging);     /* status poll */
+void ui_shutdown_screen(void);   /* the themed "Shutting down" screen (top layer) */
+void ui_shutdown_hide(void);
+void ui_power_off(void);         /* shutdown screen, save, sync, poweroff */
 void usage_save(void);                              /* before a power-off */
 long queue_pid(int create);          /* the "Queue" playlist */
 int  queue_count(void);
@@ -32,7 +35,8 @@ int  queue_next(void);
 void queue_note_prev(void);                  /* the Previous button was pressed */                       /* Next with songs queued: play the first of them (1 = handled) */        /* the user started something: the queue re-anchors after it */
 int  queue_remove_at(int i); int queue_move(int from, int to); void queue_shuffle(void); void queue_jump(int i);
 void queue_path_moved(const char *oldp, const char *newp); void queue_path_removed(const char *p);
-void queue_create(lv_obj_t *root); void queue_refresh(void);
+void queue_create(lv_obj_t *root);
+void shortcuts_config_create(lv_obj_t *root); void shortcuts_config_refresh(void); void shortcut_run(const char *key); void queue_refresh(void);
 void ui_play_slot(int pos);
 void ui_play_restore(int type, const char *name, long pid, int pos);
 int  ui_play_context(int *type, char *name, int cap, long *pid);
@@ -49,16 +53,20 @@ void tagfix_song(const char *path, const char *title, const char *artist, const 
 void tagfix_folder(const char *dir);
 void ui_toast_icon(const char *icon, lv_color_t icol, const char *msg);   /* toast with its own icon */
 void ui_scan_orbit(int on);            /* the rescan dot orbiting the rim */
+void ui_restart(void);                       /* re-exec the UI (theme change) */
+void fileops_confirm(const char *title, const char *detail, const char *yes, void (*on_yes)(void));   /* themed Cancel / <yes> dialog on the top layer */
 void fileops_open(const char *dir, const char *name, int is_dir, void (*done)(void));  /* folder browser long-press */
 void tagfix_current_track(void);      /* NP menu: add synced lyrics + artwork the current track is missing */
 void tagfix_current_album(void);      /* NP menu: the same for every track of its album */
 void tagfix_auto_tick(const track_state_t *st, int playing);   /* Auto-tag (Settings > Playback) */
 void ui_np_tags_changed(void);        /* tags were rewritten: lyrics views reload */
 #include <stdbool.h>
-enum { SCR_HOME, SCR_LIBRARY, SCR_NOWPLAYING, SCR_SETTINGS, SCR_SETTING_DETAIL, SCR_SEARCH, SCR_SAVER, SCR_QUICK, SCR_SONGINFO, SCR_NPMENU, SCR_TUNE, SCR_EQ, SCR_APPS, SCR_NPHUB, SCR_PLPICK, SCR_PLVIEW, SCR_WIFI, SCR_WIFI_INFO, SCR_BT, SCR_BT_INFO, SCR_WEATHER, SCR_LYRICS, SCR_COLORPICK, SCR_LASTFM, SCR_WORKMODE, SCR_DEBUG, SCR_FOLDER, SCR_BOOKS, SCR_CHAPTERS, SCR_SETLIST, SCR_QSCONFIG, SCR_ALBUMWALL, SCR_USAGE, SCR_QUEUE, SCR_COUNT };
+enum { SCR_HOME, SCR_LIBRARY, SCR_NOWPLAYING, SCR_SETTINGS, SCR_SETTING_DETAIL, SCR_SEARCH, SCR_SAVER, SCR_QUICK, SCR_SONGINFO, SCR_NPMENU, SCR_TUNE, SCR_EQ, SCR_APPS, SCR_NPHUB, SCR_PLPICK, SCR_PLVIEW, SCR_WIFI, SCR_WIFI_INFO, SCR_BT, SCR_BT_INFO, SCR_WEATHER, SCR_LYRICS, SCR_COLORPICK, SCR_LASTFM, SCR_WORKMODE, SCR_DEBUG, SCR_FOLDER, SCR_BOOKS, SCR_CHAPTERS, SCR_SETLIST, SCR_QSCONFIG, SCR_ALBUMWALL, SCR_USAGE, SCR_QUEUE, SCR_SCCONFIG, SCR_MODEINFO, SCR_COUNT };
 void screens_init(void);
 void screen_show(int which);
 void screen_back(void);
+void screen_home(void);              /* straight to Home, clearing the back stack */
+int  screen_press_was_long(void);    /* in a click handler: the press was a long press */
 void screen_set_anim(int on);
 int  screen_current(void);
 void ui_toast(const char *msg);   /* transient completion-feedback message */
@@ -93,6 +101,9 @@ void eqcustom_create(lv_obj_t *root);
 void colorpick_create(lv_obj_t *root);    /* accent colour picker screen */
 void colorpick_open(void);                /* seed sliders from cfg + show */
 void modes_create(lv_obj_t *root);        /* Working Mode (audio source) picker screen */
+void modeinfo_create(lv_obj_t *root);     /* SCR_MODEINFO: the active working mode, big icon + live status */
+void modeinfo_refresh(void);
+int  bt_peer_name(char *out, int cap);    /* connected BT device (cached, non-blocking): 1 + its name, or 0 */
 void modes_open(void);                     /* refresh selection + show SCR_WORKMODE */
 /* source/working mode: 0=Local 1=USB-DAC 2=BT-Receiving 3=USB-Storage */
 int  ui_set_source_mode(int mode);         /* replay the stock V2.28 switch sequence; 0=ok -1=bad arg */
@@ -180,6 +191,8 @@ void tune_refresh(void);      /* re-sync Tune panel Play Mode/EQ labels on show 
 void ui_set_dre(int on);
 void ui_set_gain(int high);
 void ui_set_output(int spdif);
+void bt_codec_apply_async(const char *mac);   /* check/apply the chosen BT codec for a routed speaker (own thread, fallback LDAC > AAC > SBC) */
+int  ui_bt_codec_changed(void);               /* Settings > Audio > BT Codec changed: re-apply on the routed speaker */
 int  ui_route_bt(const char *mac);   /* route player audio to a connected BT speaker (by MAC) */
 int  ui_route_analog(void);          /* route player audio back to the local DAC */
 void ui_set_dac_filter(int idx);

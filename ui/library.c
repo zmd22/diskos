@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "theme.h"
+#include "braun.h"
+#include "curvelist.h"
 #include "folderbrowser.h"
 #include "books.h"
 #include "musicdb.h"
@@ -111,6 +114,17 @@ static void curve_apply(lv_obj_t *r, int band){
 }
 static void curve_rows(void){
     if(!g_list) return;
+    if(th_braun()){                                                  /* Braun: straight rows, restyled */
+        for(uint32_t i = 0; i < lv_obj_get_child_count(g_list); i++){
+            lv_obj_t *r = lv_obj_get_child(g_list, i);
+            if(lv_obj_check_type(r, &lv_label_class) || lv_obj_has_flag(r, LV_OBJ_FLAG_IGNORE_LAYOUT)) continue;   /* every row (Ring curves only some) */
+            lv_area_t a; lv_obj_get_coords(r, &a);
+            if(a.y2 < -40 || a.y1 > 400) continue;
+            if(lv_obj_has_flag(r, LV_OBJ_FLAG_USER_1) && lv_obj_get_width(r) != ROW_W_FULL) lv_obj_set_width(r, ROW_W_FULL);
+            curvelist_braun_row(r);
+        }
+        return;
+    }
     uint32_t n = lv_obj_get_child_count(g_list);
     for(uint32_t i = 0; i < n; i++){
         lv_obj_t *r = lv_obj_get_child(g_list, i);
@@ -132,6 +146,7 @@ static void curve_rows(void){
 static lv_obj_t *g_pdot[N_PDOTS];
 static int g_pdot_cur = -2;
 static void pdots_update(void){
+    if(th_braun()) return;                                           /* Braun: no position dots */
     if(!g_pdot[0] || !g_list) return;
     lv_obj_update_layout(g_list);
     int32_t sy = lv_obj_get_scroll_y(g_list), sb = lv_obj_get_scroll_bottom(g_list), tot = sy + sb;
@@ -169,7 +184,7 @@ static lv_obj_t *base_row(void){
     lv_obj_set_size(r, 268, ROW_H);
     lv_obj_add_flag(r, LV_OBJ_FLAG_USER_1);                         /* eligible for the curve */
     lv_obj_set_style_radius(r, 10, 0);
-    lv_obj_set_style_bg_color(r, lv_color_hex(0x1C1C1E), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(r, lv_color_hex(TH_SURF1), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(r, LV_OPA_70, LV_STATE_PRESSED);
     lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
@@ -180,13 +195,13 @@ static void row_two(lv_obj_t *r, const char *top, const char *sub, const char *r
     lv_label_set_text(t, top); lv_label_set_long_mode(t, LV_LABEL_LONG_DOT);
     lv_obj_set_pos(t, 12, sub&&sub[0]?6:17); lv_obj_set_size(t, right&&right[0]?186:242, 24);
     lv_obj_set_style_text_font(t, ui_font_cjk(18), 0);   /* CJK titles render via Source Han Sans fallback */
-    lv_obj_set_style_text_color(t, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(t, lv_color_hex(TH_TXT1), 0);
     if(sub && sub[0]){
         lv_obj_t *s = lv_label_create(r);
         lv_label_set_text(s, sub); lv_label_set_long_mode(s, LV_LABEL_LONG_DOT);
         lv_obj_set_pos(s, 12, 31); lv_obj_set_size(s, right&&right[0]?186:242, 20);   /* clear of the duration */
         lv_obj_set_style_text_font(s, ui_font_cjk(16), 0);
-        lv_obj_set_style_text_color(s, lv_color_hex(0xC7C7CC), 0);
+        lv_obj_set_style_text_color(s, lv_color_hex(TH_SOFT), 0);
     }
     if(right && right[0]){
         lv_obj_t *rl = lv_label_create(r);
@@ -194,7 +209,7 @@ static void row_two(lv_obj_t *r, const char *top, const char *sub, const char *r
         lv_obj_set_pos(rl, 200, 19); lv_obj_set_size(rl, 56, 20);
         lv_obj_set_style_text_align(rl, LV_TEXT_ALIGN_RIGHT, 0);
         lv_obj_set_style_text_font(rl, &lv_font_montserrat_16, 0);
-        lv_obj_set_style_text_color(rl, lv_color_hex(0x8E8E93), 0);
+        lv_obj_set_style_text_color(rl, lv_color_hex(TH_MUTED), 0);
     }
 }
 
@@ -233,7 +248,7 @@ static void fav_modal_pill(lv_obj_t *card, int x, const char *txt, uint32_t col,
     lv_obj_remove_style_all(b);
     lv_obj_set_size(b, 108, 42); lv_obj_align(b, LV_ALIGN_BOTTOM_MID, x, -16);
     lv_obj_set_style_radius(b, 12, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x2C2C2E), 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(TH_SURF2), 0);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l = lv_label_create(b);
@@ -250,7 +265,7 @@ static void fav_confirm(int id){
     g_fav_modal = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(g_fav_modal);
     lv_obj_set_size(g_fav_modal, 360, 360); lv_obj_center(g_fav_modal);
-    lv_obj_set_style_bg_color(g_fav_modal, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(g_fav_modal, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(g_fav_modal, LV_OPA_70, 0);
     lv_obj_clear_flag(g_fav_modal, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(g_fav_modal, LV_OBJ_FLAG_CLICKABLE);             /* absorb taps */
@@ -259,13 +274,13 @@ static void fav_confirm(int id){
     lv_obj_remove_style_all(card);
     lv_obj_set_size(card, 264, 168); lv_obj_center(card);
     lv_obj_set_style_radius(card, 18, 0);
-    lv_obj_set_style_bg_color(card, lv_color_hex(0x1C1C1E), 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(TH_SURF1), 0);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *t = lv_label_create(card);
     lv_label_set_text(t, "Remove from Favourites?");
     lv_obj_set_style_text_font(t, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(t, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(t, lv_color_hex(TH_TXT1), 0);
     lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 24);
     lv_obj_t *s = lv_label_create(card);
     lv_label_set_text(s, title);
@@ -273,7 +288,7 @@ static void fav_confirm(int id){
     lv_obj_set_width(s, 224);
     lv_obj_set_style_text_align(s, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(s, ui_font_cjk(14), 0);   /* song title is user data: Cyrillic/CJK-capable (issue #3) */
-    lv_obj_set_style_text_color(s, lv_color_hex(0x8E8E93), 0);
+    lv_obj_set_style_text_color(s, lv_color_hex(TH_MUTED), 0);
     lv_obj_align(s, LV_ALIGN_TOP_MID, 0, 52);
     fav_modal_pill(card, -58, "Cancel", 0xC7C7CC, fav_cancel_cb);
     fav_modal_pill(card,  58, "Remove", 0xFF453A, fav_confirm_cb);
@@ -598,7 +613,7 @@ static lv_obj_t *empty_label(const char *txt){
     lv_obj_t *l = lv_label_create(g_list);
     lv_label_set_text(l, txt);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(l, lv_color_hex(0x8E8E93), 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(TH_MUTED), 0);
     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_width(l, 268);
     return l;
@@ -615,14 +630,14 @@ static void empty_scan(const char *txt){
     lv_obj_remove_style_all(b);
     lv_obj_set_size(b, 200, 46);
     lv_obj_set_style_radius(b, 23, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x1C1C1E), 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(TH_SURF1), 0);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x2C2C2E), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(b, lv_color_hex(TH_SURF2), LV_STATE_PRESSED);
     lv_obj_add_event_cb(b, scan_action_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l = lv_label_create(b);
     lv_label_set_text(l, LV_SYMBOL_REFRESH "  Scan Library");
     lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(l, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(TH_TXT1), 0);
     lv_obj_center(l);
 }
 
@@ -657,14 +672,16 @@ static void hdr_btn(lv_obj_t *row, int x, const char *txt, lv_event_cb_t cb){
     lv_obj_remove_style_all(b);
     lv_obj_set_size(b, 128, 44); lv_obj_set_pos(b, x, 4);
     lv_obj_set_style_radius(b, 12, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x1C1C1E), 0);
+    int br = th_braun();                                            /* Braun: flat off-white keys, dark type */
+    lv_obj_set_style_bg_color(b, lv_color_hex(br ? BR_SURF : 0x1C1C1E), 0);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x2C2C2E), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(b, lv_color_hex(br ? 0xCFC8BC : 0x2C2C2E), LV_STATE_PRESSED);
+    lv_obj_add_flag(b, LV_OBJ_FLAG_USER_4);                         /* Braun's row pass leaves this key's colours alone */
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l = lv_label_create(b);
     lv_label_set_text(l, txt);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(l, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(br ? BR_TXT : 0xFFFFFF), 0);
     lv_obj_center(l);
 }
 /* Album detail header: the album cover on top (from the art cache) with the artist beneath it, shown
@@ -700,7 +717,7 @@ static void add_album_cover_header(const char *album, const char *artist){
         lv_obj_t *ph = lv_obj_create(r);
         lv_obj_remove_style_all(ph);
         lv_obj_set_size(ph, 148, 148); lv_obj_align(ph, LV_ALIGN_TOP_MID, CX, 10);
-        lv_obj_set_style_bg_color(ph, lv_color_hex(0x2C2C2E), 0);
+        lv_obj_set_style_bg_color(ph, lv_color_hex(TH_SURF2), 0);
         lv_obj_set_style_bg_opa(ph, LV_OPA_COVER, 0);
         lv_obj_set_style_radius(ph, 12, 0);
         lv_obj_t *in = lv_label_create(ph);
@@ -714,7 +731,7 @@ static void add_album_cover_header(const char *album, const char *artist){
         /* ui_text_font tops out at 20 (would silently shrink a 28 request to 16): use the big latin face
          * for an ASCII initial, else the largest CJK-capable size so a non-Latin initial still renders. */
         lv_obj_set_style_text_font(in, (unsigned char)init[0] < 0x80 ? &lv_font_montserrat_28 : ui_font_cjk(20), 0);
-        lv_obj_set_style_text_color(in, lv_color_hex(0x8E8E93), 0);
+        lv_obj_set_style_text_color(in, lv_color_hex(TH_MUTED), 0);
         lv_obj_center(in);
     }
     if(has_artist){
@@ -723,7 +740,7 @@ static void add_album_cover_header(const char *album, const char *artist){
         lv_obj_set_style_text_align(a, LV_TEXT_ALIGN_CENTER, 0);
         lv_label_set_text(a, artist);
         lv_obj_set_style_text_font(a, ui_text_font(15), 0);
-        lv_obj_set_style_text_color(a, lv_color_hex(0x8E8E93), 0);
+        lv_obj_set_style_text_color(a, lv_color_hex(TH_MUTED), 0);
         lv_obj_align(a, LV_ALIGN_TOP_MID, CX, 166);
     }
 }
@@ -808,7 +825,7 @@ static void library_reload(void){
             lv_obj_t *ch = lv_label_create(r);
             lv_label_set_text(ch, LV_SYMBOL_RIGHT);
             lv_obj_set_pos(ch, 240, 17);
-            lv_obj_set_style_text_color(ch, lv_color_hex(0x636366), 0);
+            lv_obj_set_style_text_color(ch, lv_color_hex(TH_TXT3), 0);
         }
         return;
     }
@@ -822,7 +839,7 @@ static void library_reload(void){
             lv_obj_t *ch = lv_label_create(r);
             lv_label_set_text(ch, LV_SYMBOL_RIGHT);
             lv_obj_set_pos(ch, 240, 17);
-            lv_obj_set_style_text_color(ch, lv_color_hex(0x636366), 0);
+            lv_obj_set_style_text_color(ch, lv_color_hex(TH_TXT3), 0);
         }
         return;
     }
@@ -901,6 +918,7 @@ static void library_reload(void){
             row_two(r, g_plnames[i], sub, NULL);                         /* the name, and how many songs under it */
         }
     }
+    if(th_braun()){ lv_obj_update_layout(g_list); curve_rows(); }   /* Braun: every view's rows get the Braun styling */
 }
 
 void library_set_song_click_cb(library_song_click_cb_t cb){ g_song_cb=cb; }
@@ -998,7 +1016,7 @@ static void lib_ensure_group_cap(int need){
 }
 
 void library_create(lv_obj_t *root){
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
 
     g_title = ui_header_cb(root, "Library", back_cb);   /* shared header; back_cb pops the internal view stack */
@@ -1022,19 +1040,19 @@ void library_create(lv_obj_t *root){
     lv_obj_remove_style_all(g_az_btn);
     lv_obj_set_pos(g_az_btn, 302, 158); lv_obj_set_size(g_az_btn, 44, 44);
     lv_obj_set_style_radius(g_az_btn, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(g_az_btn, lv_color_hex(0x2C2C2E), 0);
+    lv_obj_set_style_bg_color(g_az_btn, lv_color_hex(TH_SURF2), 0);
     lv_obj_set_style_bg_opa(g_az_btn, LV_OPA_90, 0);
     lv_obj_add_event_cb(g_az_btn, az_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *azl=lv_label_create(g_az_btn); lv_label_set_text(azl,"A-Z");
     lv_obj_set_style_text_font(azl,&lv_font_montserrat_14,0);
-    lv_obj_set_style_text_color(azl,lv_color_hex(0xFFFFFF),0); lv_obj_center(azl);
+    lv_obj_set_style_text_color(azl,lv_color_hex(TH_TXT1),0); lv_obj_center(azl);
     lv_obj_add_flag(g_az_btn, LV_OBJ_FLAG_HIDDEN);
 
     /* alphabet grid overlay */
     g_grid = lv_obj_create(root);
     lv_obj_remove_style_all(g_grid);
     lv_obj_set_size(g_grid, 360, 360); lv_obj_set_pos(g_grid, 0, 0);
-    lv_obj_set_style_bg_color(g_grid, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(g_grid, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(g_grid, LV_OPA_80, 0);
     lv_obj_add_flag(g_grid, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(g_grid, LV_OBJ_FLAG_SCROLLABLE);
@@ -1045,7 +1063,7 @@ void library_create(lv_obj_t *root){
         lv_label_set_text(gt, "Jump to");
         lv_obj_align(gt, LV_ALIGN_TOP_MID, 0, 20);
         lv_obj_set_style_text_font(gt, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(gt, lv_color_hex(0x8E8E93), 0);
+        lv_obj_set_style_text_color(gt, lv_color_hex(TH_MUTED), 0);
     }
     {
         static const char *AZ="ABCDEFGHIJKLMNOPQRSTUVWXYZ#";
@@ -1067,7 +1085,7 @@ void library_create(lv_obj_t *root){
             lv_obj_t *l=lv_label_create(cell);
             char b[2]={AZ[i],0}; lv_label_set_text(l,b);
             lv_obj_set_style_text_font(l,&lv_font_montserrat_20,0);
-            lv_obj_set_style_text_color(l,lv_color_hex(0xFFFFFF),0); lv_obj_center(l);
+            lv_obj_set_style_text_color(l,lv_color_hex(TH_TXT1),0); lv_obj_center(l);
         }
     }
 
@@ -1077,13 +1095,13 @@ void library_create(lv_obj_t *root){
     lv_obj_set_size(g_lhint, 96, 96);
     lv_obj_center(g_lhint);
     lv_obj_set_style_radius(g_lhint, 22, 0);
-    lv_obj_set_style_bg_color(g_lhint, lv_color_hex(0x1C1C1E), 0);
+    lv_obj_set_style_bg_color(g_lhint, lv_color_hex(TH_SURF1), 0);
     lv_obj_set_style_bg_opa(g_lhint, LV_OPA_80, 0);
     lv_obj_clear_flag(g_lhint, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(g_lhint, LV_OBJ_FLAG_HIDDEN);
     g_lhint_lbl = lv_label_create(g_lhint);
     lv_obj_set_style_text_font(g_lhint_lbl, &lv_font_montserrat_40, 0);
-    lv_obj_set_style_text_color(g_lhint_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(g_lhint_lbl, lv_color_hex(TH_TXT1), 0);
     lv_label_set_text(g_lhint_lbl, "A");
     lv_obj_center(g_lhint_lbl);
     lv_timer_create(lhint_timer_cb, 150, NULL);
@@ -1095,4 +1113,10 @@ void library_create(lv_obj_t *root){
     if(total < 0) total = mdb_song_count() > 256 ? mdb_song_count() : 256;   /* COUNT failed -> generous floor, don't undersize */
     lib_alloc_buffers(total);
     library_reload();
+    if(th_braun() && g_list){                                        /* Braun: the grille, the list on the lower segment */
+        br_face(root); lv_obj_update_layout(g_list);
+        int y = lv_obj_get_y(g_list) - 6; if(y < 40) y = 40;
+        lv_obj_move_to_index(br_segment(root, y), 1);
+        curvelist_braun_watch(g_list);
+    }
 }

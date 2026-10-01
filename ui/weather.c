@@ -7,6 +7,7 @@
 #include <time.h>
 #include <math.h>
 #include "theme.h"
+#include "braun.h"
 #include <string.h>
 #include <stdint.h>
 #include <pthread.h>
@@ -335,7 +336,7 @@ static lv_color_t wd_col(const char *ic){
     if(!strcmp(ic, WI_SUN) || !strcmp(ic, WI_BOLT)) return lv_color_hex(0xFFD60A);
     if(!strcmp(ic, WI_MOON)) return lv_color_hex(0xA8B4E0);
     if(!strcmp(ic, WI_RAIN)) return lv_color_hex(0x64B5F6);
-    return lv_color_hex(0xAEAEB2);
+    return lv_color_hex(TH_TXT2);
 }
 static void set_if(lv_obj_t *l, const char *t){ if(strcmp(lv_label_get_text(l), t)) lv_label_set_text(l, t); }
 static void weather_app_refresh(void)
@@ -384,7 +385,7 @@ static void weather_app_refresh(void)
         char b[16]; snprintf(b, sizeof b, "%d\xC2\xB0", fc.s[i].t); set_if(g_wd_temp[k], b);
         snprintf(b, sizeof b, "%02d", fc.s[i].hour); set_if(g_wd_hour[k], b);
     }
-    set_if(g_wd_hint, (have_fc && fc.ok) ? "tap the place to change it" : (fc_state ? "Loading forecast..." : "Forecast unavailable"));
+    set_if(g_wd_hint, (have_fc && fc.ok) ? "" : (fc_state ? "Loading forecast..." : "Forecast unavailable"));
 }
 #ifdef WX_TEST
 void wx_test_refresh(void){ weather_app_refresh(); }
@@ -469,4 +470,12 @@ void weather_app_create(lv_obj_t *root)
     g_wd_hint = wlabel(root, &lv_font_montserrat_10, lv_color_hex(0x48484A));
     lv_obj_align(g_wd_hint, LV_ALIGN_CENTER, 0, 80);
     weather_app_refresh();
+    if(th_braun()){                                               /* Braun: the grille, a panel under the dial, dark type */
+        br_face(root); lv_obj_t *pd = br_disc(root, 180, 180, 104, BR_PANEL); lv_obj_move_to_index(pd, 1);
+        lv_obj_set_style_text_color(g_wd_ctemp, lv_color_hex(BR_TXT), 0);
+        lv_obj_set_style_text_color(g_wd_cond, lv_color_hex(BR_TXT2), 0);
+        lv_obj_set_style_text_color(g_wd_loc, lv_color_hex(BR_TXT), 0);
+        lv_obj_set_style_text_color(g_wd_hl, lv_color_hex(BR_TXT3), 0);
+        for(int k = 0; k < WD_SLOTS; k++){ lv_obj_set_style_text_color(g_wd_temp[k], lv_color_hex(BR_TXT), 0); lv_obj_set_style_text_color(g_wd_hour[k], lv_color_hex(BR_TXT3), 0); }
+    }
 }

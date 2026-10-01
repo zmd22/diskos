@@ -12,6 +12,7 @@
  * song, in your own play mode. Going back (Previous) is left alone. The queue is kept in
  * /usr/data/diskos_queue.tsv. */
 #include "screens.h"
+#include "braun.h"
 #include "theme.h"
 #include "curvelist.h"
 #include "musicdb.h"
@@ -352,16 +353,16 @@ static lv_obj_t *pill(const char *icon, const char *t, int x, int w, lv_event_cb
     lv_obj_remove_style_all(b);
     lv_obj_set_size(b, w, 28); lv_obj_set_pos(b, x, 64);
     lv_obj_set_style_radius(b, 14, 0);
-    lv_obj_set_style_bg_color(b, accent ? ui_current_accent() : lv_color_hex(TH_SURF1), 0);
+    lv_obj_set_style_bg_color(b, th_braun() ? lv_color_hex(accent ? BR_ACC : BR_SURF) : accent ? ui_current_accent() : lv_color_hex(TH_SURF1), 0);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(b, lv_color_hex(TH_SURF2), LV_STATE_PRESSED);
     lv_obj_set_ext_click_area(b, 4);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *i = lv_label_create(b); lv_label_set_text(i, icon); lv_obj_set_style_text_font(i, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(i, lv_color_hex(TH_TXT1), 0);
+    lv_obj_set_style_text_color(i, lv_color_hex(th_braun() && !accent ? BR_TXT : 0xFFFFFF), 0);
     if(t){ lv_obj_align(i, LV_ALIGN_LEFT_MID, 12, 0);
            lv_obj_t *l = lv_label_create(b); lv_label_set_text(l, t); lv_obj_set_style_text_font(l, TH_F_CAPTION, 0);
-           lv_obj_set_style_text_color(l, lv_color_hex(TH_TXT1), 0); lv_obj_align(l, LV_ALIGN_LEFT_MID, 28, 0); }
+           lv_obj_set_style_text_color(l, lv_color_hex(th_braun() && !accent ? BR_TXT : 0xFFFFFF), 0); lv_obj_align(l, LV_ALIGN_LEFT_MID, 28, 0); }
     else lv_obj_center(i);
     return b;
 }
@@ -378,8 +379,9 @@ void queue_create(lv_obj_t *root){
     lv_obj_t *ar = lv_label_create(hb); lv_label_set_text(ar, LV_SYMBOL_LEFT);
     lv_obj_set_style_text_color(ar, lv_color_hex(TH_TXT2), 0); lv_obj_align(ar, LV_ALIGN_LEFT_MID, 12, 0);
     lv_obj_t *tt = lv_label_create(hb); lv_label_set_text(tt, "Queue");
-    lv_obj_set_style_text_font(tt, TH_F_TITLE, 0); lv_obj_set_style_text_color(tt, lv_color_hex(TH_TXT1), 0); lv_obj_align(tt, LV_ALIGN_LEFT_MID, 34, 0);
-    g_sub = lv_label_create(root); lv_obj_set_style_text_font(g_sub, ui_font_cjk(14), 0);   /* has the middle dot */ lv_obj_set_style_text_color(g_sub, lv_color_hex(TH_TXT3), 0);
+    if(th_braun()){ lv_obj_set_style_text_color(ar, lv_color_hex(BR_TXT2), 0); }
+    lv_obj_set_style_text_font(tt, th_braun() ? br_font(18, 1) : TH_F_TITLE, 0); lv_obj_set_style_text_color(tt, lv_color_hex(th_braun() ? BR_TXT : TH_TXT1), 0); lv_obj_align(tt, LV_ALIGN_LEFT_MID, 34, 0);
+    g_sub = lv_label_create(root); lv_obj_set_style_text_font(g_sub, th_braun() ? br_font(12, 0) : ui_font_cjk(14), 0);   /* has the middle dot */ lv_obj_set_style_text_color(g_sub, lv_color_hex(TH_TXT3), 0);
     lv_obj_align(g_sub, LV_ALIGN_TOP_MID, 0, 44);
     pill(LV_SYMBOL_PLAY, "Play", 92, 68, play_cb, 1);
     pill(LV_SYMBOL_SHUFFLE, NULL, 166, 28, shuffle_cb, 0);        /* icon only */

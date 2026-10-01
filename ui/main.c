@@ -36,6 +36,7 @@
 #include "lastfm.h"
 #include "scanner.h"
 #include "playstate.h"
+#include "braun.h"
 
 static lv_indev_t *g_touch = NULL;
 static int         g_screen_off = 0;   /* mirrors (bl_state==2) each main-loop iteration; read by the
@@ -95,7 +96,7 @@ static void dbgdot_init(void){
     lv_obj_set_style_radius(g_dbgdot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(g_dbgdot, lv_color_hex(0x00FF66), 0);
     lv_obj_set_style_bg_opa(g_dbgdot, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(g_dbgdot, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_border_color(g_dbgdot, lv_color_hex(TH_TXT1), 0);
     lv_obj_set_style_border_width(g_dbgdot, 2, 0);
     lv_obj_add_flag(g_dbgdot, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(g_dbgdot, LV_OBJ_FLAG_CLICKABLE);
@@ -233,16 +234,72 @@ static int ao_decide(int mins, uint32_t idle, int screen_off, int *secs){
     *secs = (int)((limit - idle + 999) / 1000);
     return AO_COUNT;
 }
+/* ---- the "Shutting down" screen, in the current theme ---------------------------------------------------
+ * Ring: black, a full accent ring round the power symbol. Braun: the grille face with a dark knob, pointer and
+ * lamp lit in orange. Shown for every way the player goes off: the power key held, Settings > Shut down player,
+ * and the auto power-off. */
+static lv_obj_t *g_sd_ov;
+void ui_shutdown_hide(void){ if(g_sd_ov){ lv_obj_delete(g_sd_ov); g_sd_ov = NULL; } }
+void ui_shutdown_screen(void){
+    if(g_sd_ov){ lv_obj_move_foreground(g_sd_ov); return; }
+    lv_obj_t *o = lv_obj_create(lv_layer_top());
+    g_sd_ov = o;
+    lv_obj_remove_style_all(o);
+    lv_obj_set_size(o, 360, 360);
+    lv_obj_set_style_bg_color(o, lv_color_hex(TH_BG), 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+    lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE);                  /* taps do nothing now */
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    if(th_braun()){
+        br_face(o);
+        lv_obj_t *k = br_knob(o, 180, 140, 52, LV_SYMBOL_POWER, &lv_font_montserrat_38);
+        br_knob_set_on(k, 1);
+        lv_obj_t *t = br_label(o, "Shutting down", br_font(22, 1), BR_TXT);
+        lv_obj_align(t, LV_ALIGN_CENTER, 0, 58);
+        lv_obj_t *s = br_label(o, "Saving...", br_font(14, 0), BR_TXT2);
+        lv_obj_align(s, LV_ALIGN_CENTER, 0, 88);
+    } else {
+        lv_obj_t *ring = lv_arc_create(o);
+        lv_obj_remove_style(ring, NULL, LV_PART_KNOB);
+        lv_obj_remove_flag(ring, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_size(ring, 124, 124);
+        lv_obj_align(ring, LV_ALIGN_CENTER, 0, -34);
+        lv_arc_set_bg_angles(ring, 0, 360);
+        lv_obj_set_style_arc_width(ring, 6, LV_PART_MAIN);
+        lv_obj_set_style_arc_color(ring, ui_current_accent(), LV_PART_MAIN);
+        lv_obj_set_style_arc_width(ring, 0, LV_PART_INDICATOR);
+        lv_obj_t *ic = lv_label_create(o);
+        lv_label_set_text(ic, LV_SYMBOL_POWER);
+        lv_obj_set_style_text_font(ic, &lv_font_montserrat_38, 0);
+        lv_obj_set_style_text_color(ic, lv_color_hex(TH_TXT1), 0);
+        lv_obj_align(ic, LV_ALIGN_CENTER, 0, -34);
+        lv_obj_t *t = lv_label_create(o);
+        lv_label_set_text(t, "Shutting down");
+        lv_obj_set_style_text_font(t, TH_F_TITLE, 0);
+        lv_obj_set_style_text_color(t, lv_color_hex(TH_TXT1), 0);
+        lv_obj_align(t, LV_ALIGN_CENTER, 0, 58);
+        lv_obj_t *s = lv_label_create(o);
+        lv_label_set_text(s, "Saving...");
+        lv_obj_set_style_text_font(s, TH_F_DETAIL, 0);
+        lv_obj_set_style_text_color(s, lv_color_hex(TH_TXT2), 0);
+        lv_obj_align(s, LV_ALIGN_CENTER, 0, 88);
+    }
+    lv_refr_now(NULL);                                          /* on the panel before anything slow runs */
+}
 static uint32_t g_ao_fired;                 /* when poweroff was launched (0 = not yet) */
-static void ao_power_off(void){
+static void do_power_off(const char *why){
     if(g_ao_fired && lv_tick_elaps(g_ao_fired) < 60000) return;   /* launched already: never spawn it twice */
     g_ao_fired = lv_tick_get(); if(!g_ao_fired) g_ao_fired = 1;
-    fprintf(stderr, "auto power-off: idle timeout reached - sync + poweroff\n"); fflush(stderr);
+    fprintf(stderr, "power-off (%s): sync + poweroff\n", why); fflush(stderr);
+    ui_shutdown_screen();
     usage_save();                          /* keep the usage history up to this minute */
+    { char *hw[] = { "hwclock", "-w", NULL }; run_bounded(hw, 3000); }   /* the RTC keeps the corrected time (as on Restart) */
     sync();
     char *a[] = { "sh", "-c", "sync; poweroff", NULL };
     run_bounded(a, 10000);
 }
+static void ao_power_off(void){ do_power_off("idle timeout"); }
+void ui_power_off(void){ do_power_off("user"); }
 /* Bounded so a busy I2C/RTC can't freeze the LVGL thread while the screen is idle: a blocking
  * system("hwclock -w") on the main thread was a credible alive-but-hung idle path. */
 static void hwclock_save_tick(lv_timer_t *t){ (void)t; char *a[] = { "hwclock", "-w", NULL }; run_bounded(a, 3000); }
@@ -337,6 +394,13 @@ int ui_player_settling(void){
 static void route_uppercase(const char *in, char *out, int cap){
     int j=0; for(int i=0; in[i] && j<cap-1; i++){ char c=in[i]; if(c>='a'&&c<='z') c-=32; out[j++]=c; } out[j]=0;
 }
+/* The player's codec value for the Settings > Audio > BT Codec choice (cfg "bt_codec": 0 LDAC Balanced, 1 LDAC Quality,
+ * 2 LDAC Connection, 3 AAC, 4 SBC) -> 06b3 VALUE1: 0 SBC, 1 AAC, 2 LDAC mobile, 3 LDAC standard, 4 LDAC high. */
+static int bt_codec_x(void){
+    static const int X[5] = { 3, 4, 2, 1, 0 };
+    int c = cfg_get_int("bt_codec", 0); if(c < 0 || c > 4) c = 0;
+    return X[c];
+}
 int ui_route_bt(const char *mac){
     if(!mac) return -1;
     char norm[20]; route_uppercase(mac, norm, sizeof norm);
@@ -361,15 +425,24 @@ int ui_route_bt(const char *mac){
     ipc_send_cmd("06c1000C0000");                       /* initialize the player's BT subsystem */
     if(ipc_send_cmd("0666000C0002") < 0) return -1;     /* out_dev = BT source */
     ipc_send_cmd("0657000C0008");
-    char f[48]; snprintf(f, sizeof f, "06b3%04X0000%s", (unsigned)(12+strlen(norm)), norm);
-    if(ipc_send_cmd(f) < 0) return -1;                   /* SBC codec, stock-shaped MAC payload */
+    char f[48]; snprintf(f, sizeof f, "06b3%04X%04X%s", (unsigned)(12+strlen(norm)), (unsigned)bt_codec_x(), norm);
+    if(ipc_send_cmd(f) < 0) return -1;                   /* the chosen codec (default LDAC balanced), stock-shaped MAC payload */
     if(st.volume_seq){ char v[16]; snprintf(v, sizeof v, "0715000C%04X", st.volume); ipc_send_cmd(v); }
     /* Safe minimal resume; deterministic load/play remains a future improvement. */
     if(st.have_track && st.position_ms > 0) ui_seek_to(st.position_ms);  /* resume position, not restart */
     if(was_playing) ipc_send_cmd("0201000C0000");       /* play */
     snprintf(g_route_mac, sizeof g_route_mac, "%s", norm);
-    fprintf(stderr,"route BT %s (playing=%d pos=%ldms)\n", norm, was_playing, st.position_ms); fflush(stderr);
+    fprintf(stderr,"route BT %s (playing=%d pos=%ldms) codec value %d\n", norm, was_playing, st.position_ms, bt_codec_x()); fflush(stderr);
+    bt_codec_apply_async(norm);                          /* verify what bluealsa selected; fall back LDAC > AAC > SBC */
     return 0;
+}
+/* the BT Codec setting changed while a speaker is routed: tell the player the new value, then re-check */
+int ui_bt_codec_changed(void){
+    if(!g_route_mac[0]) return 0;
+    char f[48]; snprintf(f, sizeof f, "06b3%04X%04X%s", (unsigned)(12+strlen(g_route_mac)), (unsigned)bt_codec_x(), g_route_mac);
+    if(ipc_send_cmd(f) < 0) return -1;
+    bt_codec_apply_async(g_route_mac);
+    return 1;
 }
 int ui_route_analog(void){
     if(!g_route_mac[0]) return 0;                       /* already on local/analog */
@@ -1848,6 +1921,14 @@ static void diag_sd(const char *msg){
 #define diag_sd(m) ((void)0)
 #endif
 
+/* restart the UI in place (a theme change): same pid, so the watchdog keeps seeing us */
+void ui_restart(void){
+    cfg_flush(); sync();
+    char *ua[2]; ua[0] = "mq_ui"; ua[1] = NULL;
+    for(int fd = 3; fd < 256; fd++) close(fd);                     /* the new image reopens fb / input / ipc */
+    execv("/usr/data/mq_ui", ua);
+    _exit(1);                                                      /* exec failed: the watchdog restarts us */
+}
 int main(int argc, char **argv){
 #ifdef DISKOS_DIAG_FBMARK
     /* DIAGNOSTIC: paint the framebuffer magenta the instant our main() runs, so a hung boot can be
@@ -1925,8 +2006,7 @@ int main(int argc, char **argv){
      * share a file offset and don't clobber each other; line-buffered so the last
      * step before a crash is flushed. Truncates each launch (boot launch is what
      * we care about; avoids unbounded NAND growth). */
-    freopen("/usr/data/diskos_boot.log", "w", stderr);
-    dup2(fileno(stderr), fileno(stdout));
+    if(freopen("/usr/data/diskos_boot.log", "w", stderr)) dup2(fileno(stderr), fileno(stdout));   /* on failure keep the old stderr */
     setvbuf(stdout, NULL, _IOLBF, 0);
     setvbuf(stderr, NULL, _IOLBF, 0);
     diag_sd("mqui: main() entered, boot log open");
@@ -2119,6 +2199,7 @@ int main(int argc, char **argv){
     int woke = 0;   /* a press that only wakes the saver is swallowed */
     int bl_state = 0;   /* 0 = normal, 1 = saver-dim, 2 = off */
     uint32_t last_blpoll = 0;   /* PW-10 backlight-rail poll cadence */
+    uint32_t last_pkpoll = 0;   /* power-key hold watcher cadence */
     int player_blanked = 0;     /* PW-10: we forced bl_power=4 because the player blanked via brightness=0 */
     unsigned last_vol_seq = 0;
     /* Start the boot splash HERE - after all the blocking startup init (hwclock, bt_boot_restore,
@@ -2496,7 +2577,7 @@ int main(int argc, char **argv){
          * brightness==0 && bl_power==0 is unambiguously a player-side blank. Catch it on a slow poll,
          * fully power the rail down (bl_power=4) and sync bl_state=2 so only a touch wakes. When the
          * player raises brightness again (a second power press), bring the panel back to match. */
-        if(lv_tick_elaps(last_blpoll) >= 250){
+        if(lv_tick_elaps(last_blpoll) >= (player_blanked ? 80u : 250u)){   /* poll fast while blanked: the player's own level is corrected within a frame or two */
             last_blpoll = lv_tick_get();
             int cbr = read_int_file("/sys/class/backlight/backlight/brightness");
             int cbp = read_int_file("/sys/class/backlight/backlight/bl_power");
@@ -2504,8 +2585,40 @@ int main(int argc, char **argv){
                 /* player blanked via brightness-only -> cut the rail. Won't re-fire (bl_power now 4). */
                 ui_backlight(0); bl_state = 2; player_blanked = 1;
             } else if(player_blanked && cbr > 0){
-                /* player un-blanked (2nd power press restored brightness) -> restore the panel. */
-                ui_backlight(cbr); bl_state = 0; last_activity = lv_tick_get(); player_blanked = 0;
+                /* player un-blanked (2nd power press): it restores ITS OWN remembered level, not the one
+                 * set here (Quick Settings / Display), so the brightness looked reset after every
+                 * off > on cycle. Put the saved diskOS brightness back instead of adopting cbr. */
+                ui_backlight(ui_get_brightness()); bl_state = 0; last_activity = lv_tick_get(); player_blanked = 0;
+            }
+        }
+
+        {   /* the power key held: the player owns the key and starts its shutdown, so show the themed screen
+             * while that runs. The level is read from the GPIO pin (x2000 GPE bit 31, active low) because the
+             * input layer never delivers this key to us. Released early and still running 3.5 s later: a false
+             * alarm, the screen goes away. The hold time is cfg "pwr_hold_ms" (default 5000: the player powers off after a 5 s hold). */
+            static volatile uint32_t *gpe; static int gpe_tried;
+            static int pk_down, pk_shown, pk_seen_up; static uint32_t pk_since, pk_rel;   /* pk_seen_up: ignore a key still held from power-on */
+            if(lv_tick_elaps(last_pkpoll) >= 50){
+                last_pkpoll = lv_tick_get();
+                if(!gpe && !gpe_tried){
+                    gpe_tried = 1;
+                    int m = open("/dev/mem", O_RDONLY | O_SYNC);
+                    if(m >= 0){ void *mp = mmap(NULL, 4096, PROT_READ, MAP_SHARED, m, 0x10010000); close(m);
+                                if(mp != MAP_FAILED) gpe = (volatile uint32_t *)((char *)mp + 0x400); }
+                }
+                int d = gpe ? (((*gpe >> 31) & 1u) == 0) : 0;
+                if(!d) pk_seen_up = 1;
+                if(d && !pk_down && pk_seen_up){ pk_down = 1; pk_since = lv_tick_get(); }
+                else if(!d && pk_down){ pk_down = 0; pk_rel = lv_tick_get(); }
+                int hold = cfg_get_int("pwr_hold_ms", 5000); if(hold < 300) hold = 300;
+                if(pk_down && !pk_shown && lv_tick_elaps(pk_since) >= (uint32_t)hold){
+                    pk_shown = 1;
+                    if(bl_state){ ui_backlight(ui_get_brightness()); bl_state = 0; player_blanked = 0; }   /* lit, so it can be seen */
+                    last_activity = lv_tick_get();
+                    ui_shutdown_screen();
+                } else if(pk_shown && !pk_down && lv_tick_elaps(pk_rel) > 3500 && !g_ao_fired){
+                    ui_shutdown_hide(); pk_shown = 0;
+                }
             }
         }
 
@@ -2523,7 +2636,7 @@ int main(int argc, char **argv){
             uint32_t idle = a1 < a2 ? a1 : a2;
             int secs = 0, act = ao_decide(mins, idle, bl_state == 2, &secs);
             if(act == AO_OFF){ ao_hide(); ao_power_off();
-                if(g_ao_fired && lv_tick_elaps(g_ao_fired) >= 60000){ g_ao_fired = 0; ao_busy_at = lv_tick_get(); } }  /* failed: start over */
+                if(g_ao_fired && lv_tick_elaps(g_ao_fired) >= 60000){ g_ao_fired = 0; ao_busy_at = lv_tick_get(); ui_shutdown_hide(); } }  /* failed: start over, screen away */
             else if(act == AO_COUNT) ao_show(secs);                                 /* lit or dimmed: count down */
             else ao_hide();
         }

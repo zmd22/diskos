@@ -7,6 +7,7 @@
  * The name sits at the top; the hub in the middle cancels. Favourite is filled red when it already is one. */
 #include "screens.h"
 #include "theme.h"
+#include "braun.h"
 #include "orbit.h"
 #include "musicdb.h"
 #include "ipc.h"
@@ -82,7 +83,7 @@ static void open_menu(const char *title, const int *acts, int n){
     orbit_create(&g_orb, g_ov, it, g_nact, -90, pick);
     for(int i = 0; i < g_nact; i++){
         if(g_act[i] == A_FAV){ lv_obj_set_style_text_font(g_orb.icon[i], &font_theme_20, 0); orbit_set_on(&g_orb, i, g_fav, ui_current_accent()); }
-        if(g_act[i] == A_DELETE) lv_obj_set_style_text_color(g_orb.icon[i], ui_current_accent(), 0);
+        if(g_act[i] == A_DELETE && !th_braun()) lv_obj_set_style_text_color(g_orb.icon[i], ui_current_accent(), 0);
     }
     orbit_hub_create(&g_orb, g_ov, hub_cb, g_is_dir ? LV_SYMBOL_DIRECTORY : LV_SYMBOL_AUDIO, "Cancel");
     lv_obj_t *t = lv_label_create(g_ov);

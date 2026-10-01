@@ -147,7 +147,7 @@ static const char *fb_basename(const char *p){
 static void fb_empty_label(const char *msg){
     lv_obj_t *l = lv_label_create(g_list);
     lv_label_set_text(l, msg);
-    lv_obj_set_style_text_color(l, lv_color_hex(0x8E8E93), 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(TH_MUTED), 0);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
 }
@@ -307,7 +307,7 @@ static void fb_header_back_cb(lv_event_t *e){
 }
 
 void folderbrowser_create(lv_obj_t *root){
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
 
     g_title = ui_header_cb(root, "Files", fb_header_back_cb);   /* back-chevron ascends a level */

@@ -20,11 +20,13 @@ typedef struct {
     lv_obj_t *ring, *hub, *hub_icon, *hub_cap;
     orbit_pick_cb pick;
     int first_deg;                       /* where button 0 sits (LVGL degrees) */
+    lv_obj_t *lamp[8], *ptr[8];   /* Braun knobs: the lamp above, the pointer */
 } orbit_t;
 /* buttons clockwise from first_deg (LVGL angles: 0 = 3 o'clock, clockwise), evenly spaced */
 void orbit_create(orbit_t *o, lv_obj_t *root, const orbit_item_t *it, int n, int first_deg, orbit_pick_cb pick);
 /* long captions (app / device names): a fixed width, centred, ending in "..." */
 void orbit_cap_width(orbit_t *o, int w, const lv_font_t *font);
+void orbit_braun_icons(orbit_t *o);        /* Braun: knob icons stay white */
 void orbit_set_on(orbit_t *o, int i, int on, lv_color_t accent);        /* filled in the accent */
 void orbit_set_pending(orbit_t *o, int i, lv_color_t accent);           /* ringed; -1 clears */
 void orbit_set_glyph(orbit_t *o, int i, const char *glyph);

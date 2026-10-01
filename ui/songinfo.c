@@ -2,6 +2,7 @@
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
 #include "theme.h"
+#include "braun.h"
 #include "musicdb.h"
 #include <sys/stat.h>
 #include <string.h>
@@ -27,7 +28,7 @@ static lv_obj_t *g_ring, *g_cover, *g_cover_img, *g_cover_note, *g_title, *g_art
 
 void songinfo_create(lv_obj_t *root)
 {
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
 
     g_header = ui_header(root, "Song Info");   /* kept for the book relabel; the cover ring replaces it visually */
@@ -47,7 +48,7 @@ void songinfo_create(lv_obj_t *root)
     lv_obj_set_style_bg_opa(g_cover, LV_OPA_COVER, 0);
     lv_obj_clear_flag(g_cover, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     g_cover_note = lv_label_create(g_cover); lv_label_set_text(g_cover_note, LV_SYMBOL_AUDIO);
-    lv_obj_set_style_text_font(g_cover_note, &lv_font_montserrat_20, 0); lv_obj_set_style_text_color(g_cover_note, lv_color_hex(0xFFFFFF), 0); lv_obj_center(g_cover_note);
+    lv_obj_set_style_text_font(g_cover_note, &lv_font_montserrat_20, 0); lv_obj_set_style_text_color(g_cover_note, lv_color_hex(TH_TXT1), 0); lv_obj_center(g_cover_note);
     g_cover_img = lv_image_create(g_cover); lv_obj_add_flag(g_cover_img, LV_OBJ_FLAG_HIDDEN);
     g_title = lv_label_create(root);
     lv_obj_set_width(g_title, 240); lv_label_set_long_mode(g_title, LV_LABEL_LONG_DOT);
@@ -93,10 +94,20 @@ void songinfo_create(lv_obj_t *root)
         lv_obj_set_width(v, 156);
         lv_label_set_long_mode(v, LV_LABEL_LONG_DOT);
         lv_obj_set_style_text_font(v, ui_font_cjk(14), 0);   /* CJK titles/artist/album via Source Han Sans fallback (was montserrat_16 -> boxes) */
-        lv_obj_set_style_text_color(v, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_color(v, lv_color_hex(TH_TXT1), 0);
         lv_label_set_text(v, "-");
         g_val[i] = v;
         if(i == F_TITLE || i == F_ARTIST) lv_obj_add_flag(cell, LV_OBJ_FLAG_HIDDEN);   /* shown in the header instead */
+    }
+    if(th_braun()){                                               /* Braun: the grille; details on the lower segment */
+        br_face(root); lv_obj_move_to_index(br_segment(root, 186), 1);
+        lv_obj_set_style_text_color(g_title, lv_color_hex(BR_TXT), 0); lv_obj_set_style_text_font(g_title, br_font(18, 1), 0);
+        lv_obj_set_style_text_color(g_artist, lv_color_hex(BR_TXT2), 0);
+        lv_obj_set_style_arc_color(g_ring, lv_color_hex(BR_SURF), LV_PART_MAIN);
+        for(int i = 0; i < F_COUNT; i++){
+            if(g_key[i]){ lv_obj_set_style_text_color(g_key[i], lv_color_hex(BR_TXT3), 0); lv_obj_set_style_text_font(g_key[i], br_font(12, 0), 0); }
+            if(g_val[i]) lv_obj_set_style_text_color(g_val[i], lv_color_hex(BR_TXT), 0);
+        }
     }
 }
 

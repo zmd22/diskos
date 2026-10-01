@@ -1,126 +1,168 @@
 # diskOS UI fork — features
 
 > **Thank you, [b0hemia](https://github.com/b0hemia)!** This work stands entirely on
-> [diskOS](https://github.com/b0hemia/diskos) — the custom firmware, installer and original UI that made any of
-> this possible. All credit for diskOS itself goes to b0hemia and the diskOS contributors; this fork only
-> reworks the on-device interface.
+> [diskOS](https://github.com/b0hemia/diskos): the custom firmware, installer and original UI. All credit for
+> diskOS goes to b0hemia and the diskOS contributors; this fork only reworks the on-device interface.
 
-> **Disclaimer:** this software is provided **as is**, for **testing and experimentation only**, without warranty
-> of any kind, express or implied. Installing custom firmware or UI software can misbehave, lose data or make a
-> device temporarily unusable. **You use it entirely at your own risk**; the author of this fork accepts no
-> responsibility or liability for any damage, data loss or other consequences arising from its use. This fork is
-> not affiliated with or endorsed by FiiO or the upstream diskOS project. (See also the warranty disclaimer in
-> the GPL, `ui/COPYING`.)
+> **Disclaimer:** provided **as is**, for **testing and experimentation only**, without warranty of any kind.
+> Custom firmware / UI software can misbehave, lose data or make a device temporarily unusable. **Use at your own
+> risk**; the author of this fork accepts no responsibility or liability. Not affiliated with FiiO or upstream diskOS.
 
-A reworked touch interface for the **FiiO Snowsky Disc** (round 360×360 screen), built on the diskOS
-UI as released in **diskOS 1.1.2** (the `ui/` folder is identical in 1.1.0–1.1.2). Everything below is in
-`ui/`; the installer and the rest of diskOS are unchanged.
+A reworked touch interface for the **FiiO Snowsky Disc** (round 360×360 screen, firmware V2.40), built on the
+UI of **diskOS 1.1.2**. Only `ui/` changes (the `mq_ui` binary); the installer is unchanged. Two complete
+looks ship in the same build — **Ring** (default) and **Braun** — switchable in Settings › Display › Theme.
 
-![Overview](screenshots/00-overview.png)
+> The screenshots are rendered from the real UI code (LVGL, no device); the track, cover, battery, weather and
+> volume shown are invented test data. See `render-harness/`.
 
-The design language: **rings and orbits** made for a round screen — progress rings, rim arcs, menus whose
-buttons orbit a hub, lists whose rows curve with the circle — with the album's colour as the accent.
+![Ring overview](screenshots/00-overview.png)
 
 ---
 
-## Home
-The clock inside the playing track's progress ring, the cover riding the ring at the current position,
-the weather above the clock, title (album colour) and artist below, and Library · play/pause · Search.
-The battery is an arc on the top rim (red when low).
+## Two themes
 
-| Playing | Low battery | Idle |
+### Ring — rings and orbits
+Black, made for the round screen: progress rings, arcs on the rim, menus whose buttons orbit a hub, lists
+whose rows curve with the circle. The accent colour (default red, or follow the album) marks what's on;
+media screens take the album's colour.
+
+### Braun — 70s Braun / Dieter Rams
+Warm off-white with a **speaker-grille** dot texture, **dark-grey knobs** with white icons, a pointer and an
+indicator lamp, a solid **lower segment** panel following the round edge, straight lists, **Inter** type, and one
+**orange** accent that means only "on / primary / focused". Switching restarts the UI in a couple of seconds.
+
+![Braun overview](screenshots/braun/00-overview.png)
+
+| | Ring | Braun |
 |---|---|---|
-| ![](screenshots/01-home.png) | ![](screenshots/02-home-low-battery.png) | ![](screenshots/03-home-idle.png) |
+| Home | ![](screenshots/01-home.png) | ![](screenshots/braun/01-home.png) |
+| Now Playing | ![](screenshots/02-now-playing.png) | ![](screenshots/braun/02-now-playing.png) |
+| Volume | ![](screenshots/03-volume.png) | ![](screenshots/braun/03-volume.png) |
+| Now Playing options | ![](screenshots/04-now-playing-options.png) | ![](screenshots/braun/04-now-playing-options.png) |
+| Quick Settings | ![](screenshots/05-quick-settings.png) | ![](screenshots/braun/05-quick-settings.png) |
+| Settings | ![](screenshots/06-settings.png) | ![](screenshots/braun/06-settings.png) |
+| Shortcuts | ![](screenshots/10-shortcuts.png) | ![](screenshots/braun/10-shortcuts.png) |
+| Equalizer | ![](screenshots/11-equalizer.png) | ![](screenshots/braun/11-equalizer.png) |
+| Queue | ![](screenshots/12-queue.png) | ![](screenshots/braun/12-queue.png) |
+| Standby | ![](screenshots/13-standby.png) | ![](screenshots/braun/13-standby.png) |
+| Long-press menu | ![](screenshots/22-song-menu.png) | ![](screenshots/braun/22-song-menu.png) |
 
-## Standby screen
-The **Ring** screensaver: a bigger, dimmed version of Home — weather on top, a large clock, title and
-artist — inside a faint progress ring with the cover on it. Redraws once a minute. The original styles
-(Cover, Analog, Minimal, Digital, Vinyl) remain selectable.
+---
 
-![](screenshots/26-screensaver.png)
+## Home & standby
+* **Ring:** the clock inside the playing track's progress ring, the cover riding the ring, weather above the
+  clock, title (album colour) and artist below; **Library · play/pause · Search** as large buttons (56 px circles
+  either side of a 68 px play/pause, all sharing one top edge); the battery is an arc on the top rim.
+* **Braun:** a Braun wall clock (numerals, orange second hand) with the weather in a window at 3 o'clock; the
+  track and the three buttons on the lower segment (40 px circles either side of a 50 px orange play disc, tops
+  aligned); a thin black battery arc.
+* **Standby:** Ring = a large dimmed ring clock (weather on top, big time, title/artist); Braun = the clock
+  enlarged with hour marks only, dimmed, redrawn once a minute. Five classic saver styles remain selectable.
 
 ## Now Playing
-Four styles: **Ring** (the cover in its progress ring, drag the ring to seek), **Poster**, Cover and
-Vinyl. Long titles scroll briefly, then settle. A queue icon with a count sits under the play-mode icon.
-The **immersive** view (tap the cover) shows the cover and synced lyrics.
+* Styles: **Ring** (cover in its progress ring — drag the ring to seek), **Poster**, **Cover**, **Vinyl**;
+  in Braun its own layout (cover on a panel inside an orange ring, controls on the segment).
+* **Immersive view** (tap the cover): the cover with synced lyrics.
+* **Volume popup:** Ring = an accent arc on the right rim with a large number; Braun = a dark scale band with
+  light marks, an orange needle and a big number box. Drag it; tap the middle to close; it hides by itself.
+* **Options** (swipe left or ⋯): Favourite, Playlist, Lyrics, Equalizer, Info, Album, Artist, Tags orbiting
+  the cover (an audiobook variant with Chapters and Details).
+* A queue icon with a count under the play-mode icon.
 
-| Ring | Ring, long title | Poster | Immersive + lyrics |
+## Menus
+Quick Settings (configurable tiles), Settings and Working mode are **orbits** around a hub (tap the hub to go
+back; **hold any back control to jump straight Home**); in Braun they are knobs with white icons whose pointer turns orange and lamp lights when active.
+**Rescan** asks "Rescan library?" first (Quick Settings and Settings), and says "Already scanning" while a scan runs.
+
+## Working modes
+Pick a mode on the **Working mode** orbit: Local, USB DAC, BT DAC, BT streaming, AirPlay, USB storage. While any
+mode other than Local is active it gets **its own screen**: a big icon (the same symbol as its orbit button), the
+mode name, a status line, a detail line, and two buttons — **Modes** (back to the picker) and **Local** (back to
+normal playback). Ring = the icon in a ring that turns while waiting and goes solid when connected; Braun = the icon on
+a dark knob whose lamp lights when connected.
+
+| Mode | Status and details | Ring | Braun |
 |---|---|---|---|
-| ![](screenshots/14-now-playing-ring.png) | ![](screenshots/15-now-playing-ring-long-title.png) | ![](screenshots/10-now-playing-poster.png) | ![](screenshots/12-immersive-lyrics.png) |
+| Picker | six modes around a hub | ![](screenshots/14-working-mode.png) | ![](screenshots/braun/14-working-mode.png) |
+| USB storage | waiting / connected to computer, SD card size, "Eject on the computer first" | ![](screenshots/15-mode-usb-storage.png) | ![](screenshots/braun/15-mode-usb-storage.png) |
+| USB DAC | waiting / connected, volume, sample rate if reported | ![](screenshots/16-mode-usb-dac.png) | ![](screenshots/braun/16-mode-usb-dac.png) |
+| BT streaming | the speaker streamed to | ![](screenshots/17-mode-bt-streaming.png) | ![](screenshots/braun/17-mode-bt-streaming.png) |
+| BT DAC | the connected phone or computer, volume | ![](screenshots/18-mode-bt-dac.png) | ![](screenshots/braun/18-mode-bt-dac.png) |
+| AirPlay | "Pick the Disc on your device", or playing title and artist | ![](screenshots/19-mode-airplay.png) | ![](screenshots/braun/19-mode-airplay.png) |
+| Waiting state | e.g. no speaker connected | ![](screenshots/20-mode-waiting.png) | ![](screenshots/braun/20-mode-waiting.png) |
 
-**Volume popup:** an arc on the right rim in the accent colour, value at clock size; drag the arc, tap the
-middle to close.  ![](screenshots/24-volume.png)
+## Power
+* **Shut down player** is the last row of Settings › System, with a Cancel / Shut down confirmation.
+* A themed **Shutting down** screen (Ring: accent ring round a power symbol; Braun: dark knob with its lamp lit)
+  appears when you shut down from Settings, when auto power-off fires, and when you hold the power key (shown after
+  5 seconds, while the player's own shutdown runs; hold time `pwr_hold_ms`, default 5000).
+* **Auto power-off** with a 30 s countdown that a tap cancels.
 
-**Options menu** (swipe left on Now Playing, or the ⋯ button): eight actions orbiting the cover —
-Favourite, Playlist, Lyrics, Equalizer, Info, Album, Artist, Tags.  ![](screenshots/25-np-menu.png)
-
-## Orbit menus
-Quick Settings, Settings and Working mode as orbits around a hub (tap the hub to go back).
-
-| Quick Settings | Settings | Working mode |
+| | Ring | Braun |
 |---|---|---|
-| ![](screenshots/04-quick-settings.png) | ![](screenshots/05-settings.png) | ![](screenshots/06-working-mode.png) |
+| Settings › System, bottom | ![](screenshots/08-settings-system-bottom.png) | ![](screenshots/braun/08-settings-system-bottom.png) |
+| Shut down confirmation | ![](screenshots/09-shutdown-confirm.png) | ![](screenshots/braun/09-shutdown-confirm.png) |
+| Rescan confirmation | ![](screenshots/21-rescan-confirm.png) | ![](screenshots/braun/21-rescan-confirm.png) |
+| Shutting down | ![](screenshots/23-shutting-down.png) | ![](screenshots/braun/23-shutting-down.png) |
+
+## Shortcuts (swipe left from Home)
+Up to **five shortcuts** of your choice, set in **Settings › Display › Shortcuts**: Weather, Immersive,
+Equalizer, Folders, Lyrics, Queue, Audiobooks, Search, Battery, Song Info, Last.fm, **All apps**, or any
+installed homebrew app. All apps shows every app (Last.fm, homebrew apps, Settings), so nothing is unreachable.
 
 ## Library & browsing
-* **Curved lists** with position dots on the rim; smooth scrolling that stays fast with very large
-  libraries (tested with 30,000 songs, 3,000-entry folders and playlists).
-* **Long-press a song** (Library): Add to queue, Playlist, Favourite, Album, Artist, Info, Tags.
-* **Folder browser** in the same style; long-press a song for queue actions + Rename, Copy/Move, Delete,
-  or a folder for queue/playlist/tags + file operations (the playing track is protected; deletes confirm).
+* Curved lists with position dots (Ring) or straight lists with a single orange focus dot (Braun); fast with
+  very large libraries (tested with 30,000 songs and 3,000-entry folders/playlists).
+* Album wall, artists, albums, genres, favourites, playlists, history.
+* **Long-press a song:** Add to queue, Playlist, Favourite, Album, Artist, Info, Tags.
+* **Folder browser** with file operations: rename, copy/move, delete (the playing track is protected; deletes
+  confirm). Renames/moves/deletes keep playlists and the queue up to date.
 * **Search** with a big-key keyboard.
 
-| Artists | Album | Hold a song | Folders | Hold a folder | Search |
-|---|---|---|---|---|---|
-| ![](screenshots/07-artists-curved.png) | ![](screenshots/09-album-by-track.png) | ![](screenshots/31-library-hold-song.png) | ![](screenshots/34-folder-browser.png) | ![](screenshots/33-folder-hold-folder.png) | ![](screenshots/18-search.png) |
-
 ## Queue (up next)
-Enqueued songs play **after the current song** (or after the last enqueued one), in order — Shuffle and
-Repeat paused — then playback **returns to what you were playing**, in your play mode. Next goes straight to
-the first queued song; Previous is left alone. The Queue screen shows what's playing, what's next and where
-playback returns; tap a song to jump to it, drag to reorder, Shuffle or Clear. It survives a restart, and
-file renames/moves/deletes keep it (and all playlists) up to date.
-
-![](screenshots/48-queue.png)
+Enqueue songs or folders: they play **after the current song** (or after the last queued one), in order —
+Shuffle/Repeat paused — then playback **returns to what you were playing**, in your play mode. Next jumps
+straight to the first queued song; Previous is left alone. The Queue screen shows playing now / up next /
+where playback returns: tap to jump, drag to reorder, Shuffle or Clear. Survives a restart.
 
 ## Playlists
-Curved rows with song counts; "Add to playlist" picker in the same style.
-
-| Playlists | Add to playlist |
-|---|---|
-| ![](screenshots/38-playlists.png) | ![](screenshots/39-add-to-playlist.png) |
+Playlists with song counts and an "Add to playlist" picker in the same style.
 
 ## Equalizer
-Ten bands as "pizza slices": ±6 dB in 0.1 dB steps, **movable band frequencies** (a parametric-lite EQ,
-Q fixed), −/+ buttons, a number pad, double-tap a band to reset it; built-in presets shown read-only.
-
-| Gain | Frequency | Number pad | Built-in |
-|---|---|---|---|
-| ![](screenshots/27-eq-gain.png) | ![](screenshots/28-eq-frequency.png) | ![](screenshots/29-eq-number-pad.png) | ![](screenshots/30-eq-built-in.png) |
+Ten bands, **±6 dB in 0.1 dB steps**, **movable band frequencies** (parametric-lite, fixed Q), −/+ fine
+steps, a number pad, double-tap to reset a band; built-in presets read-only. Ring = round "pizza" dial;
+Braun = a **fader bank** with a lamp over the selected band. *Known gap:* the built-in presets (Jazz, Rock, ...)
+show flat, because their curves are not in the player's EQ table.
 
 ## Lyrics & artwork tagging
-From any song/album/folder menu, or automatically (**Auto-tag**): fetches synced lyrics (lrclib) and a
-600 px cover (iTunes) and writes them into the file's own tags (FLAC and MP3), only where missing.
+From any song/album/folder menu, or automatically (**Auto-tag**): synced lyrics (lrclib) and 600 px covers
+(iTunes) written into the file's own tags (FLAC and MP3), only where missing. The Lyrics screen shows them in
+large type (20 px).
 
 ## More screens
-| Song Info (bitrate) | Battery & usage | Weather | Apps | Accent colour |
-|---|---|---|---|---|
-| ![](screenshots/37-song-info.png) | ![](screenshots/23-battery-usage.png) | ![](screenshots/42-weather.png) | ![](screenshots/40-apps.png) | ![](screenshots/41-accent.png) |
+* **Song Info** with bitrate · **Battery & usage** — a 24-hour dial of battery level, screen-on and playing,
+  7 days of history · **Weather** dial (next 24 hours around the rim; tap the place to change the city, hold for
+  automatic) · **Audiobooks** with progress rings and **Chapters** as a ring of segments · **Wi-Fi / Bluetooth**
+  with status rings (Ring) or status knobs (Braun); the connected speaker shows its codec ("Connected - LDAC"); **Settings > Audio > BT Codec** picks LDAC Balanced (default) / Quality / Connection, AAC or SBC, with an LDAC > AAC > SBC fallback · **Last.fm** · **Accent colour** ring · toasts and a
+  **library-rescan** indicator on the rim.
 
-| Audiobooks | Chapters | Wi-Fi | Bluetooth | Toast + rescan |
-|---|---|---|---|---|
-| ![](screenshots/43-audiobooks.png) | ![](screenshots/44-chapters.png) | ![](screenshots/45-wifi.png) | ![](screenshots/46-bluetooth.png) | ![](screenshots/36-toast-rescan.png) |
-
-* **Battery & usage:** a 24-hour dial of battery level with screen-on and playing rings, 7 days of history.
-* **Weather:** the next 24 hours around the rim (wttr.in, fetched only while open).
-* **Audiobooks:** progress rings, time left; **Chapters:** a ring of segments, tap to jump.
-* **Wi-Fi / Bluetooth:** a status ring (off / turning on / connected) and curved lists.
-* **Library rescan:** a small dot orbits the rim while scanning; a toast when done.
-* **Auto power-off** after idle time.
+## Text & fonts
+Montserrat (Ring), Inter (Braun) and the international fonts (CJK, Cyrillic…) chained, including typographic
+punctuation (’ “ ” … – ·) from track titles and lyrics.
 
 ## Reliability & performance
-* SD-card safety: a periodic filesystem flush so the card's metadata can't be lost on a hard power-off.
-* Stability fixes (a use-after-free in long lists, bounds checks in the FLAC/JSON parsers), bounded
-  Wi-Fi/Bluetooth commands so a hung service can't freeze the UI, work kept off the UI thread.
-* Checked with AddressSanitizer/UBSan and cppcheck; render tests for each screen.
+SD-card safety (periodic filesystem flush), stability fixes (use-after-free in long lists, parser bounds
+checks), time-limited **Bluetooth checks** (a stuck Bluetooth service can no longer hold the screen for seconds, and turning Bluetooth on from Quick Settings now starts audio routing), the **brightness you set survives a power-button screen off/on**, Wi-Fi/Bluetooth
+commands with timeouts, heavy work off the UI thread, lists that only build visible rows. Checked with sanitizers
+and static analysis during development.
 
-See [CHANGES.md](CHANGES.md) for the detailed change log.
+## Install
+```bash
+./diskos-installer install --firmware SNOWSKY_DISC_update_V2.40.zip --ui /path/to/mq_ui
+```
+Quick preview without flashing: copy `mq_ui` to the player over SSH (see `docs/PREVIEW_UI_BUILD.md`).
+Build from source: clone b0hemia/diskos at `v1.1.2`, `git apply diskos-ui-fork-vs-upstream.patch`, then
+`cd ui && make CROSS=mipsel-linux-musl-` (musl cross toolchain; see FORK.md). `mq_ui` md5:
+`069ff039e7ff06aee7ed33e80290b9fc`.
+
+See **CHANGES.md** for the detailed change log.

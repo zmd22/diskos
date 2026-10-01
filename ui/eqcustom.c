@@ -13,6 +13,7 @@
  * selected with 0689. A preset whose filters the round editor can't represent (another filter type or Q)
  * is shown and never overwritten. Selecting a preset only selects it - writes happen on an edit. */
 #include "screens.h"
+#include "braun.h"
 #include "theme.h"
 #include "config.h"
 #include "musicdb.h"
@@ -116,6 +117,50 @@ static px_t *g_px; static int g_bstart[NB + 1];
 static lv_area_t g_bbox[NB];
 static int g_lvl16[NB] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };   /* last painted level (1/16 px) per band */
 static int g_lastsel = -2, g_lastgrey = -1; static uint32_t g_lastacc;
+/* ---- Braun: a fader bank (ten slots cut into the grille, dark caps, a lamp above the selected band) ---- */
+#define FX0   58
+#define FSTEP 27.1f
+#define FTOP  70
+#define FBOT  214
+#define FMID  ((FTOP + FBOT) / 2)
+#define FKPX  ((FBOT - FTOP) / 2.0f / 6.0f)                 /* px per dB */
+static lv_obj_t *g_fslot[NB], *g_fcap[NB], *g_fline[NB], *g_flamp;
+static int fx(int i){ return (int)lroundf(FX0 + i * FSTEP); }
+static void braun_faders_create(lv_obj_t *root){
+    lv_obj_t *zero = lv_obj_create(root); lv_obj_remove_style_all(zero);        /* the 0 dB line */
+    lv_obj_set_size(zero, 272, 1); lv_obj_set_pos(zero, 44, FMID);
+    lv_obj_set_style_bg_color(zero, lv_color_hex(0xBAB4AA), 0); lv_obj_set_style_bg_opa(zero, LV_OPA_COVER, 0);
+    static const char *const SC[3] = { "+6", "0", "\xE2\x88\x92" "6" };
+    for(int k = 0; k < 3; k++){ lv_obj_t *l = br_label(root, SC[k], br_font(12, 0), BR_TXT3);
+        lv_obj_align(l, LV_ALIGN_TOP_LEFT, 38, (k == 0 ? FTOP : k == 1 ? FMID : FBOT) - 8); }
+    for(int i = 0; i < NB; i++){
+        g_fslot[i] = lv_obj_create(root); lv_obj_remove_style_all(g_fslot[i]);
+        lv_obj_set_size(g_fslot[i], 6, FBOT - FTOP); lv_obj_set_pos(g_fslot[i], fx(i) - 3, FTOP);
+        lv_obj_set_style_radius(g_fslot[i], 3, 0); lv_obj_set_style_bg_color(g_fslot[i], lv_color_hex(0x282624), 0); lv_obj_set_style_bg_opa(g_fslot[i], LV_OPA_COVER, 0);
+        g_fcap[i] = lv_obj_create(root); lv_obj_remove_style_all(g_fcap[i]);
+        lv_obj_set_size(g_fcap[i], 18, 12); lv_obj_set_style_radius(g_fcap[i], 2, 0);
+        lv_obj_set_style_bg_color(g_fcap[i], lv_color_hex(BR_KNOB), 0); lv_obj_set_style_bg_opa(g_fcap[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_shadow_color(g_fcap[i], lv_color_hex(0x9C968C), 0); lv_obj_set_style_shadow_width(g_fcap[i], 4, 0); lv_obj_set_style_shadow_offset_y(g_fcap[i], 1, 0);
+        g_fline[i] = lv_obj_create(g_fcap[i]); lv_obj_remove_style_all(g_fline[i]);
+        lv_obj_set_size(g_fline[i], 12, 2); lv_obj_center(g_fline[i]);
+        lv_obj_set_style_bg_opa(g_fline[i], LV_OPA_COVER, 0);
+        lv_obj_clear_flag(g_fslot[i], LV_OBJ_FLAG_CLICKABLE); lv_obj_clear_flag(g_fcap[i], LV_OBJ_FLAG_CLICKABLE); lv_obj_clear_flag(g_fline[i], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_text_font(g_rim[i], br_font(12, 0), 0);
+        lv_obj_align(g_rim[i], LV_ALIGN_TOP_MID, fx(i) - 180, FBOT + 6);
+    }
+    g_flamp = br_disc(root, 0, 0, 3, BR_ACC);
+}
+static void braun_faders_paint(void){
+    for(int i = 0; i < NB; i++){
+        int t = clampi(g_t[i], -GMAX, GMAX);
+        int y = (int)lroundf(FMID - t / 10.0f * FKPX);
+        lv_obj_set_pos(g_fcap[i], fx(i) - 9, y - 6);
+        lv_obj_set_style_bg_color(g_fcap[i], lv_color_hex(g_editable ? BR_KNOB : 0x96928B), 0);
+        lv_obj_set_style_bg_color(g_fline[i], lv_color_hex(i == g_sel && g_editable ? BR_ACC : g_editable ? 0xC8C4BC : 0xDCD8D0), 0);
+    }
+    if(g_sel >= 0 && g_editable){ lv_obj_set_pos(g_flamp, fx(g_sel) - 3, FTOP - 12); lv_obj_remove_flag(g_flamp, LV_OBJ_FLAG_HIDDEN); }
+    else lv_obj_add_flag(g_flamp, LV_OBJ_FLAG_HIDDEN);
+}
 static void geometry(void){
     if(g_px) return;
     int cnt[NB] = {0}, total = 0;
@@ -171,6 +216,7 @@ static void paint_band(int b, uint32_t *fb){
 }
 /* repaint only what changed: bands whose level moved, the old/new selection, everything on a colour change */
 static void paint(void){
+    if(th_braun()){ braun_faders_paint(); return; }
     if(!g_canvas) return;
     geometry(); if(!g_px) return;
     lv_draw_buf_t *db = lv_canvas_get_draw_buf(g_canvas); if(!db) return;
@@ -191,7 +237,7 @@ static void refresh_labels(void){
     for(int i = 0; i < NB; i++){                                    /* only labels that changed are touched */
         fmt_freq(b, sizeof b, g_f[i], 0);
         if(strcmp(lv_label_get_text(g_rim[i]), b)) lv_label_set_text(g_rim[i], b);
-        lv_color_t want = i == g_sel ? ui_current_accent() : lv_color_hex(TH_TXT3);
+        lv_color_t want = i == g_sel ? ui_current_accent() : lv_color_hex(th_braun() ? BR_TXT2 : TH_TXT3);
         if(!lv_color_eq(lv_obj_get_style_text_color(g_rim[i], 0), want)) lv_obj_set_style_text_color(g_rim[i], want, 0);
     }
     preset_name(g_preset, b, sizeof b);
@@ -202,14 +248,16 @@ static void refresh_labels(void){
     if(show_edit){
         fmt_freq(b, sizeof b, g_f[g_sel], 1); if(strcmp(lv_label_get_text(g_flbl), b)) lv_label_set_text(g_flbl, b);
         fmt_gain(b, sizeof b, clampi(g_t[g_sel], -GMAX, GMAX)); if(strcmp(lv_label_get_text(g_glbl), b)) lv_label_set_text(g_glbl, b);   /* old +-12 presets show at the edge */
-        lv_obj_set_style_text_font(g_flbl, g_mode_freq ? TH_F_TITLE : &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(g_flbl, g_mode_freq ? ui_current_accent() : lv_color_hex(TH_TXT2), 0);
-        lv_obj_set_style_text_font(g_glbl, g_mode_freq ? &lv_font_montserrat_14 : TH_F_TITLE, 0);
-        lv_obj_set_style_text_color(g_glbl, g_mode_freq ? lv_color_hex(TH_TXT2) : ui_current_accent(), 0);
+        int br = th_braun();                                        /* Braun: the big value in black, the other in grey */
+        lv_obj_set_style_text_font(g_flbl, g_mode_freq ? (br ? br_font(22, 1) : TH_F_TITLE) : (br ? br_font(14, 0) : &lv_font_montserrat_14), 0);
+        lv_obj_set_style_text_color(g_flbl, g_mode_freq ? (br ? lv_color_hex(BR_TXT) : ui_current_accent()) : lv_color_hex(br ? BR_TXT2 : TH_TXT2), 0);
+        lv_obj_set_style_text_font(g_glbl, g_mode_freq ? (br ? br_font(14, 0) : &lv_font_montserrat_14) : (br ? br_font(22, 1) : TH_F_TITLE), 0);
+        lv_obj_set_style_text_color(g_glbl, g_mode_freq ? lv_color_hex(br ? BR_TXT2 : TH_TXT2) : (br ? lv_color_hex(BR_TXT) : ui_current_accent()), 0);
+        if(br){ lv_obj_align(g_flbl, LV_ALIGN_TOP_MID, 0, g_mode_freq ? 272 : 250); lv_obj_align(g_glbl, LV_ALIGN_TOP_MID, 0, g_mode_freq ? 250 : 272); }
         lv_label_set_text(g_modecap, g_mode_freq ? "FREQ" : "GAIN");
     }
     const char *note = NULL;
-    if(!g_editable) note = g_preset == 0 ? "EQ off" : g_readfail ? "Couldn't read this preset" : g_parametric ? "Advanced preset" : "built-in preset";
+    if(!g_editable) note = g_preset == 0 ? "EQ off" : g_readfail ? "Couldn't read this preset" : g_parametric ? "Advanced preset" : th_braun() ? "Built-in preset" : "built-in preset";
     else if(g_sel < 0) note = "tap a band";
     if(note){ lv_label_set_text(g_note, note); lv_obj_remove_flag(g_note, LV_OBJ_FLAG_HIDDEN); }
     else lv_obj_add_flag(g_note, LV_OBJ_FLAG_HIDDEN);
@@ -243,6 +291,12 @@ static void pm_cb(lv_event_t *e){
 
 /* the dial: select a band; drag out / in for its gain */
 static int hit_band(int x, int y, float *dist){
+    if(th_braun()){
+        if(y < FTOP - 16 || y > FBOT + 16 || x < FX0 - 14 || x > fx(NB - 1) + 14) return -1;
+        int b = (int)lroundf((x - FX0) / FSTEP); b = clampi(b, 0, NB - 1);
+        if(dist) *dist = R0 + (FMID - y) / FKPX * ((RMAX - R0) / 6.0f);        /* the dial's distance for this height */
+        return b;
+    }
     float dx = x - CX, dy = y - CY, d = sqrtf(dx * dx + dy * dy);
     if(d < RMIN - 6 || d > RMAX + 14) return -1;
     float a = atan2f(dx, -dy) * 57.29578f; if(a < 0) a += 360.0f;
@@ -479,6 +533,25 @@ void eqcustom_create(lv_obj_t *root){
     g_note = lv_label_create(root);
     lv_obj_set_style_text_font(g_note, TH_F_CAPTION, 0); lv_obj_set_style_text_color(g_note, lv_color_hex(TH_TXT3), 0);
     lv_obj_align(g_note, LV_ALIGN_CENTER, 0, 4);
+    if(th_braun()){
+        br_face(root); lv_obj_move_to_index(br_segment(root, 240), 1);
+        if(g_canvas) lv_obj_add_flag(g_canvas, LV_OBJ_FLAG_HIDDEN);
+        braun_faders_create(root);
+        lv_obj_align(pill, LV_ALIGN_TOP_MID, 0, 28);
+        lv_obj_set_style_bg_color(pill, lv_color_hex(BR_SURF), 0); lv_obj_set_style_text_color(g_pill_lbl, lv_color_hex(BR_TXT), 0);
+        lv_obj_set_style_text_font(g_pill_lbl, br_font(12, 0), 0); lv_obj_set_style_text_color(chev, lv_color_hex(BR_TXT2), 0);
+        lv_obj_t *pm[2] = { g_minus, g_plus };
+        for(int k = 0; k < 2; k++){                                 /* - / + as dark knobs on the segment */
+            lv_obj_set_size(pm[k], 42, 42); lv_obj_align(pm[k], LV_ALIGN_TOP_MID, k ? 84 : -84, 262);
+            lv_obj_set_style_bg_color(pm[k], lv_color_hex(BR_KNOB), 0); lv_obj_set_style_bg_opa(pm[k], LV_OPA_COVER, 0);
+            lv_obj_set_style_border_color(pm[k], lv_color_hex(BR_KNOB_L), 0); lv_obj_set_style_border_width(pm[k], 2, 0);
+            lv_obj_t *l = lv_obj_get_child(pm[k], 0); if(l) lv_obj_set_style_text_color(l, lv_color_hex(0xFFFFFF), 0);
+        }
+        lv_obj_set_style_text_font(g_modecap, br_font(12, 0), 0); lv_obj_set_style_text_color(g_modecap, lv_color_hex(BR_TXT3), 0);
+        lv_obj_align(g_modecap, LV_ALIGN_TOP_MID, 0, 304);
+        lv_obj_set_style_text_font(g_note, br_font(14, 0), 0); lv_obj_set_style_text_color(g_note, lv_color_hex(BR_TXT2), 0);
+        lv_obj_align(g_note, LV_ALIGN_TOP_MID, 0, 272);
+    }
     if(!g_draw_tmr) g_draw_tmr = lv_timer_create(draw_tmr_cb, 50, NULL);
     load(cfg_get_int("eq_preset", 0));    /* painted on first show (eqcustom_refresh), not at boot */
 }

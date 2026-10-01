@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "theme.h"
 #include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -187,7 +188,7 @@ void debug_create(lv_obj_t *root){
      * contrast (bright white); the password also gets the accent colour + bigger font to stand out. */
     g_ssh = lv_label_create(root);
     lv_obj_set_width(g_ssh, 320); lv_obj_set_style_text_align(g_ssh, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(g_ssh, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(g_ssh, lv_color_hex(TH_TXT1), 0);
     lv_obj_align(g_ssh, LV_ALIGN_TOP_MID, 0, 94);
 
     g_pw = lv_label_create(root);
@@ -198,7 +199,7 @@ void debug_create(lv_obj_t *root){
 
     g_serial = lv_label_create(root);
     lv_obj_set_width(g_serial, 300); lv_obj_set_style_text_align(g_serial, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(g_serial, lv_color_hex(0x8E8E93), 0);
+    lv_obj_set_style_text_color(g_serial, lv_color_hex(TH_MUTED), 0);
     lv_obj_align(g_serial, LV_ALIGN_TOP_MID, 0, 158);
 
     g_warn = lv_label_create(root);

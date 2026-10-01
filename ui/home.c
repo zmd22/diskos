@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "braun.h"
+void bhome_create(lv_obj_t *root); void bhome_set_clock(const char *t, const char *s); void bhome_set_weather(const char *s);
+void bhome_set_status(int batt, int charging, int wifi, int bt); void bhome_set_now_playing(const char *title, const char *artist, bool playing);
 #include "theme.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -156,6 +159,7 @@ void home_set_settings_click_cb(home_settings_click_cb_t cb)
 
 void home_set_clock(const char *time_text, const char *sub_text)
 {
+    if(th_braun()){ bhome_set_clock(time_text, sub_text); return; }
     if (g_clock) lv_label_set_text(g_clock, time_text ? time_text : "--:--");
     if (g_clock_sub) lv_label_set_text(g_clock_sub, sub_text ? sub_text : "");
 }
@@ -170,6 +174,7 @@ static void wx_short(const char *in, char *out, size_t cap){
 void home_set_weather(const char *text)
 {
     char s[96]; wx_short(text, s, sizeof s);
+    if(th_braun()){ const char *p = s; while(*p == ' ') p++; bhome_set_weather(p); return; }
     if (g_weather) lv_label_set_text(g_weather, s);          /* icon + temperature, above the clock */
 }
 
@@ -244,6 +249,7 @@ static void np_progress_tick(lv_timer_t *t){
 
 void home_set_status(int batt, int charging, int wifi, int bt)
 {
+    if(th_braun()){ bhome_set_status(batt, charging, wifi, bt); return; }
     if (!g_status) return;
     char buf[80]; char *p = buf; *p = 0;
     if (wifi) { p += sprintf(p, LV_SYMBOL_WIFI "  "); }
@@ -265,6 +271,7 @@ void home_set_status(int batt, int charging, int wifi, int bt)
 void home_set_now_playing(const char *title, const char *artist,
                           lv_color_t accent, bool playing)
 {
+    if(th_braun()){ bhome_set_now_playing(title, artist, playing); return; }
     g_accent = accent;
 
     if (g_np_title){
@@ -289,6 +296,7 @@ void home_set_now_playing(const char *title, const char *artist,
  * Home tracks the same colour as Now Playing - static or album-dynamic). */
 void home_set_accent(lv_color_t accent)
 {
+    if(th_braun()) return;                                   /* Braun: orange only, no album colour */
     g_accent = accent;
     if (g_ring) lv_obj_set_style_arc_color(g_ring, accent, LV_PART_INDICATOR);
     if (g_np_title) lv_obj_set_style_text_color(g_np_title, accent, 0);
@@ -300,6 +308,7 @@ void home_set_accent(lv_color_t accent)
 /* full-screen blurred backdrop (the 360px gblur'd cover), or NULL to clear -> black */
 void home_set_backdrop(const void *src)
 {
+    if(th_braun()) return;
     if (g_home_bg) lv_image_set_src(g_home_bg, NULL);   /* same RAM buffer, new pixels: force a redraw */
     if (!g_home_bg || !g_home_scrim) return;
     if (src) {
@@ -314,6 +323,7 @@ void home_set_backdrop(const void *src)
 
 void home_set_art_src(const void *src)
 {
+    if(th_braun()) return;
     if (!g_np_art_img || !g_np_thumb_glyph) return;
 
     if (src) {
@@ -338,24 +348,30 @@ static void disc_place(int frac){                           /* put the cover on 
     lv_obj_set_pos(g_np_thumb, 180 + (int)lroundf(HR_R * cosf(a)) - HR_DISC / 2, 180 + (int)lroundf(HR_R * sinf(a)) - HR_DISC / 2);
 }
 static void settle_cb(lv_timer_t *t){ (void)t; if(g_np_title) lv_label_set_long_mode(g_np_title, LV_LABEL_LONG_DOT); lv_timer_pause(g_settle); }
+/* Home's bottom row: Library and Search are 56 px circles, play/pause a 68 px box; all three share ONE top
+ * edge (HB_TOP), so the smaller buttons hang from the play button's top, not from its middle. */
+#define HB_TOP  276
+#define HB_SIDE 56
+#define HB_PLAY 68
 static lv_obj_t *round_btn(lv_obj_t *root, const char *sym, int dx){
     lv_obj_t *b = lv_button_create(root);
     lv_obj_remove_style_all(b);
-    lv_obj_set_size(b, 48, 48);
-    lv_obj_align(b, LV_ALIGN_TOP_MID, dx, 284);
+    lv_obj_set_size(b, HB_SIDE, HB_SIDE);
+    lv_obj_align(b, LV_ALIGN_TOP_MID, dx, HB_TOP);
     lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(b, lv_color_hex(TH_SURF1), 0);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(b, lv_color_hex(TH_SURF2), LV_STATE_PRESSED);
     lv_obj_set_ext_click_area(b, 6);
     lv_obj_t *l = lv_label_create(b); lv_label_set_text(l, sym);
-    lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(l, lv_color_hex(0xFFFFFF), 0); lv_obj_center(l);
     return b;
 }
 
 void home_create(lv_obj_t *root)
 {
+    if(th_braun()){ bhome_create(root); return; }
     g_accent = lv_color_hex(UI_RED);
 
     lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
@@ -493,20 +509,20 @@ void home_create(lv_obj_t *root)
     disc_place(0);
 
     /* bottom: Library, play/pause (album colour), Search */
-    lv_obj_t *lib = round_btn(root, LV_SYMBOL_AUDIO, -52);
+    lv_obj_t *lib = round_btn(root, LV_SYMBOL_AUDIO, -72);
     lv_obj_add_event_cb(lib, nav_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)SCR_LIBRARY);
-    lv_obj_t *srch = round_btn(root, TH_IC_SEARCH, 52);
-    lv_obj_set_style_text_font(lv_obj_get_child(srch, 0), &font_theme_20, 0);
+    lv_obj_t *srch = round_btn(root, TH_IC_SEARCH, 72);
+    lv_obj_set_style_text_font(lv_obj_get_child(srch, 0), &font_theme_24, 0);
     lv_obj_add_event_cb(srch, nav_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)SCR_SEARCH);
     lv_obj_t *pp = lv_button_create(root);
     lv_obj_remove_style_all(pp);
-    lv_obj_set_size(pp, 48, 48);
-    lv_obj_align(pp, LV_ALIGN_TOP_MID, 0, 284);
+    lv_obj_set_size(pp, HB_PLAY, HB_PLAY);
+    lv_obj_align(pp, LV_ALIGN_TOP_MID, 0, HB_TOP);
     lv_obj_set_ext_click_area(pp, 6);
     lv_obj_add_event_cb(pp, pp_event_cb, LV_EVENT_CLICKED, NULL);
     g_np_state = lv_label_create(pp);
     lv_label_set_text(g_np_state, LV_SYMBOL_PLAY);
-    lv_obj_set_style_text_font(g_np_state, &lv_font_montserrat_26, 0);
+    lv_obj_set_style_text_font(g_np_state, &lv_font_montserrat_32, 0);
     lv_obj_set_style_text_color(g_np_state, g_accent, 0);
     lv_obj_center(g_np_state);
 

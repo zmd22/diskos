@@ -1,3 +1,4 @@
+#include "theme.h"
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "radial.h"
 #include <math.h>
@@ -66,12 +67,12 @@ void radial_create(radial_t *r, lv_obj_t *root, const radial_item_t *it, int n,
         r->icon[i] = lv_label_create(root);
         lv_label_set_text(r->icon[i], it[i].glyph);
         lv_obj_set_style_text_font(r->icon[i], &lv_font_montserrat_20, 0);
-        lv_obj_set_style_text_color(r->icon[i], lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_color(r->icon[i], lv_color_hex(TH_TXT1), 0);
         lv_obj_align(r->icon[i], LV_ALIGN_CENTER, cx, cy - (two ? 16 : 12));
         r->l1[i] = lv_label_create(root);
         lv_label_set_text(r->l1[i], it[i].l1);
         lv_obj_set_style_text_font(r->l1[i], &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(r->l1[i], lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_color(r->l1[i], lv_color_hex(TH_TXT1), 0);
         lv_obj_align(r->l1[i], LV_ALIGN_CENTER, cx, cy + (two ? 6 : 12));
         r->l2[i] = NULL;
         if(two){
@@ -110,7 +111,7 @@ void radial_create(radial_t *r, lv_obj_t *root, const radial_item_t *it, int n,
     r->hub_icon = lv_label_create(r->hub);
     lv_label_set_text(r->hub_icon, hub_glyph ? hub_glyph : "");
     lv_obj_set_style_text_font(r->hub_icon, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(r->hub_icon, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(r->hub_icon, lv_color_hex(TH_TXT1), 0);
     lv_obj_align(r->hub_icon, LV_ALIGN_CENTER, 0, -10);
     r->hub_cap = lv_label_create(r->hub);
     lv_label_set_text(r->hub_cap, hub_caption ? hub_caption : "");
@@ -138,7 +139,7 @@ void radial_set_state(radial_t *r, int active, int pending, lv_color_t accent){
     for(int i = 0; i < r->n; i++){
         paint_slice(r, i);
         int mark = (i == active || i == r->pending);
-        lv_obj_set_style_text_color(r->icon[i], mark ? accent : lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_color(r->icon[i], mark ? accent : lv_color_hex(TH_ONACC), 0);
         if(r->l2[i]) lv_obj_set_style_text_color(r->l2[i], lv_color_hex(C_TXT2), 0);
     }
     if(active >= 0)          outline_slice(r, active, accent, LV_OPA_COVER);      /* outline, no fill */

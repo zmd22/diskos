@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
+#include "lvgl/src/indev/lv_indev_private.h"   /* long_pr_sent: was the press that sent this click a long press? */
 #include "screens.h"
+#include "theme.h"
 #include "folderbrowser.h"
 #include "books.h"
 #include "anim.h"
@@ -24,7 +26,7 @@ static lv_obj_t *screen_make_root(lv_obj_t *parent)
     lv_obj_remove_style_all(root);
     lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
     lv_obj_set_pos(root, 0, 0);
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
     /* full black square; the physical round bezel masks the shape. Clipping to a
      * circle here just exposed the lighter screen behind at the corners. */
@@ -119,6 +121,8 @@ static void transition(int from, int to, int dir)
     else if (to == SCR_ALBUMWALL) albumwall_refresh();      /* cover-flow album browser */
     else if (to == SCR_USAGE) usage_refresh();              /* battery & usage dial */
     else if (to == SCR_QUEUE) queue_refresh();              /* the up-next queue */
+    else if (to == SCR_MODEINFO) modeinfo_refresh();         /* the active working mode */
+    else if (to == SCR_SCCONFIG) shortcuts_config_refresh();   /* Settings > Display > Shortcuts */
     else if (to == SCR_NPMENU) npmenu_refresh_art();        /* the cover in the menu's hub */
     else if (to == SCR_TUNE)  tune_refresh();
     else if (to == SCR_NPHUB) nphub_refresh();   /* book-aware hub (Chapters for audiobooks) */
@@ -208,9 +212,30 @@ void screen_show(int which)
     transition(from, which, +1);
 }
 
-/* Pop the nav stack (swipe / back gesture). Home is the root: no-op. */
+/* 1 while handling a click whose press was held past the long-press time (LVGL still sends CLICKED on release). */
+int screen_press_was_long(void)
+{
+    lv_indev_t *i = lv_indev_active();
+    return i && i->long_pr_sent;
+}
+
+/* Straight to Home, dropping the whole back stack. */
+void screen_home(void)
+{
+    if (s_current == SCR_HOME) { s_sp = 0; return; }
+    int from = s_current;
+    s_sp = 0;
+    s_current = SCR_HOME;
+    transition(from, SCR_HOME, -1);
+}
+
+/* Pop the nav stack (swipe / back gesture). Home is the root: no-op.
+ * A long press on any back control (header arrow, orbit hub, ...) goes straight Home instead: every such control
+ * ends up here from its CLICKED handler, after its own clean-up has run. Swipes and timers call this outside an
+ * input event, so they always step back one screen. */
 void screen_back(void)
 {
+    if (s_current != SCR_SAVER && screen_press_was_long()) { screen_home(); return; }
     if (s_sp <= 0) return;
     int from = s_current;
     int prev = s_stack[--s_sp];
@@ -237,7 +262,7 @@ void screens_init(void)
     if (access("/usr/data/anim_off", 0) == 0) s_anim = 0;   /* legacy override */
 
     lv_obj_t *parent = lv_screen_active();
-    lv_obj_set_style_bg_color(parent, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(parent, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, 0);
     /* The screen container must not scroll: during a slide, the incoming screen sits off-screen
      * to the right (x=+360), which overflows the parent and makes LVGL draw a horizontal
@@ -279,6 +304,8 @@ void screens_init(void)
     s_roots[SCR_ALBUMWALL] = screen_make_root(parent);
     s_roots[SCR_USAGE]     = screen_make_root(parent);
     s_roots[SCR_QUEUE]     = screen_make_root(parent);
+    s_roots[SCR_SCCONFIG]  = screen_make_root(parent);
+    s_roots[SCR_MODEINFO]  = screen_make_root(parent);
 
     /* depth scrim: a full-screen translucent-black overlay, created LAST so it sits above the
      * roots in sibling order; re-parented in z during a transition to dim the screen beneath the
@@ -287,7 +314,7 @@ void screens_init(void)
     lv_obj_remove_style_all(s_scrim);
     lv_obj_set_size(s_scrim, LV_PCT(100), LV_PCT(100));
     lv_obj_set_pos(s_scrim, 0, 0);
-    lv_obj_set_style_bg_color(s_scrim, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(s_scrim, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(s_scrim, LV_OPA_COVER, 0);   /* object opacity (animated) gates visibility */
     lv_obj_set_style_opa(s_scrim, LV_OPA_TRANSP, 0);
     lv_obj_clear_flag(s_scrim, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
@@ -305,6 +332,8 @@ void screens_init(void)
     albumwall_create(s_roots[SCR_ALBUMWALL]);
     usage_create(s_roots[SCR_USAGE]);
     queue_create(s_roots[SCR_QUEUE]);
+    shortcuts_config_create(s_roots[SCR_SCCONFIG]);
+    modeinfo_create(s_roots[SCR_MODEINFO]);
     search_create(s_roots[SCR_SEARCH]);
     saver_create(s_roots[SCR_SAVER]);
     quicksettings_create(s_roots[SCR_QUICK]);

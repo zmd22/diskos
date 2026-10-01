@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "theme.h"
 #include "musicdb.h"
 #include "artcache.h"
 #include "config.h"
@@ -405,7 +406,7 @@ void albumwall_refresh(void){
 
     lv_obj_clean(g_root);
     for(int c=0;c<AW_CARDS;c++){ g_front[c]=NULL; g_side[c]=NULL; }
-    lv_obj_set_style_bg_color(g_root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(g_root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(g_root, LV_OPA_COVER, 0);
     ui_header_cb(g_root, "Albums", aw_back_cb);
 
@@ -413,7 +414,7 @@ void albumwall_refresh(void){
     if(g_nalb <= 0){
         lv_obj_t *e = lv_label_create(g_root);
         lv_label_set_text(e, g_names ? "No albums found" : "Out of memory");
-        lv_obj_center(e); lv_obj_set_style_text_color(e, lv_color_hex(0x8E8E93), 0);
+        lv_obj_center(e); lv_obj_set_style_text_color(e, lv_color_hex(TH_MUTED), 0);
         return;
     }
     if(g_cur >= g_nalb) g_cur = 0;
@@ -428,23 +429,23 @@ void albumwall_refresh(void){
 
     g_initial = lv_label_create(g_root);
     lv_obj_set_style_text_font(g_initial, ui_text_font(20), 0);
-    lv_obj_set_style_text_color(g_initial, lv_color_hex(0x8E8E93), 0);
+    lv_obj_set_style_text_color(g_initial, lv_color_hex(TH_MUTED), 0);
     lv_obj_align(g_initial, LV_ALIGN_TOP_MID, 0, 72 + AW_SRC/2 - 12);
     lv_obj_add_flag(g_initial, LV_OBJ_FLAG_HIDDEN);
 
     g_name = lv_label_create(g_root);
     lv_label_set_long_mode(g_name, LV_LABEL_LONG_DOT); lv_obj_set_size(g_name, 260, 24);
     lv_obj_set_style_text_align(g_name, LV_TEXT_ALIGN_CENTER, 0); lv_obj_align(g_name, LV_ALIGN_TOP_MID, 0, 266);
-    lv_obj_set_style_text_font(g_name, ui_text_font(18), 0); lv_obj_set_style_text_color(g_name, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(g_name, ui_text_font(18), 0); lv_obj_set_style_text_color(g_name, lv_color_hex(TH_TXT1), 0);
 
     g_artist = lv_label_create(g_root);
     lv_label_set_long_mode(g_artist, LV_LABEL_LONG_DOT); lv_obj_set_size(g_artist, 220, 20);
     lv_obj_set_style_text_align(g_artist, LV_TEXT_ALIGN_CENTER, 0); lv_obj_align(g_artist, LV_ALIGN_TOP_MID, 0, 292);
-    lv_obj_set_style_text_font(g_artist, ui_text_font(16), 0); lv_obj_set_style_text_color(g_artist, lv_color_hex(0x8E8E93), 0);
+    lv_obj_set_style_text_font(g_artist, ui_text_font(16), 0); lv_obj_set_style_text_color(g_artist, lv_color_hex(TH_MUTED), 0);
 
     g_counter = lv_label_create(g_root);
     lv_obj_align(g_counter, LV_ALIGN_TOP_MID, 0, 318);
-    lv_obj_set_style_text_font(g_counter, &lv_font_montserrat_14, 0); lv_obj_set_style_text_color(g_counter, lv_color_hex(0x636366), 0);
+    lv_obj_set_style_text_font(g_counter, &lv_font_montserrat_14, 0); lv_obj_set_style_text_color(g_counter, lv_color_hex(TH_TXT3), 0);
 
     aw_render_all(); aw_labels();
 }

@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "theme.h"
+#include "braun.h"
 #include "ipc.h"
 #include "musicdb.h"
 #include <stdio.h>
@@ -405,7 +407,7 @@ void lyrics_poll(lv_timer_t *t)
 
 void lyrics_create(lv_obj_t *root)
 {
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
 
     ui_header(root, "Lyrics");   /* shared standard header */
@@ -422,9 +424,17 @@ void lyrics_create(lv_obj_t *root)
     lv_obj_set_width(g_text, 280);
     lv_label_set_long_mode(g_text, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(g_text, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(g_text, ui_font_cjk(16), 0);   /* CJK lyrics render via Source Han Sans fallback */
+    lv_obj_set_style_text_font(g_text, ui_font_cjk(20), 0);   /* larger; CJK lyrics render via Source Han Sans fallback */
     lv_obj_set_style_text_color(g_text, lv_color_hex(0xE5E5EA), 0);
+    lv_obj_set_style_text_line_space(g_text, 6, 0);
     lv_label_set_text(g_text, "");
+    if(th_braun()){                                              /* Braun: the lyrics on the off-white segment, dark Inter */
+        br_face(root);
+        lv_obj_move_to_index(br_segment(root, 68), 1);
+        lv_obj_set_style_text_font(g_text, br_font(20, 0), 0);
+        lv_obj_set_style_text_color(g_text, lv_color_hex(BR_TXT), 0);
+        lv_obj_set_style_text_line_space(g_text, 8, 0);
+    }
 }
 
 /* ---- timed lyrics for the immersive view ---------------------------------------------------------------

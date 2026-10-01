@@ -65,9 +65,9 @@ static lv_obj_t *mk_slider(lv_obj_t *root, int y, int max){
     lv_obj_set_pos(sl, 56, y); lv_obj_set_size(sl, 248, 12);
     lv_obj_set_ext_click_area(sl, 16);   /* 12px slider -> ~44px grab band on the capacitive panel */
     lv_slider_set_range(sl, 0, max);
-    lv_obj_set_style_bg_color(sl, lv_color_hex(0x2C2C2E), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(sl, lv_color_hex(0x8E8E93), LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(sl, lv_color_hex(0xFFFFFF), LV_PART_KNOB);
+    lv_obj_set_style_bg_color(sl, lv_color_hex(TH_SURF2), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(sl, lv_color_hex(TH_MUTED), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(sl, lv_color_hex(TH_TXT1), LV_PART_KNOB);
     lv_obj_add_event_cb(sl, slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(sl, slider_release_cb, LV_EVENT_RELEASED, NULL);
     /* a drag that ends in press-lost (finger slid off) must persist too, else the live
@@ -78,7 +78,7 @@ static lv_obj_t *mk_slider(lv_obj_t *root, int y, int max){
 static void mk_label(lv_obj_t *root, int y, const char *txt){
     lv_obj_t *l = lv_label_create(root);
     lv_label_set_text(l, txt); lv_obj_set_pos(l, 56, y);
-    lv_obj_set_style_text_color(l, lv_color_hex(0x8E8E93), 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(TH_MUTED), 0);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
 }
 
@@ -96,7 +96,7 @@ static void paint(void){                                    /* selection, hub an
     int sel = g_mode ? preset_of(g_rgb) : -1;
     for(int i = 0; i < NSW; i++){
         lv_obj_set_style_border_width(g_sw[i], i == sel ? 3 : 0, 0);
-        lv_obj_set_style_border_color(g_sw[i], lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_border_color(g_sw[i], lv_color_hex(TH_TXT1), 0);
     }
     lv_color_t hc = g_mode ? lv_color_hex((uint32_t)g_rgb) : ui_media_accent();
     lv_obj_set_style_bg_color(g_hub, hc, 0);
@@ -185,7 +185,7 @@ void colorpick_create(lv_obj_t *root){
     lv_obj_set_style_bg_opa(g_hub, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(g_hub, hub_done_cb, LV_EVENT_CLICKED, NULL);
     g_hub_glyph = lv_label_create(g_hub);
-    lv_obj_set_style_text_font(g_hub_glyph, &lv_font_montserrat_20, 0); lv_obj_set_style_text_color(g_hub_glyph, lv_color_hex(0xFFFFFF), 0); lv_obj_center(g_hub_glyph);
+    lv_obj_set_style_text_font(g_hub_glyph, &lv_font_montserrat_20, 0); lv_obj_set_style_text_color(g_hub_glyph, lv_color_hex(TH_TXT1), 0); lv_obj_center(g_hub_glyph);
     g_hub_name = lv_label_create(root);
     lv_obj_set_style_text_font(g_hub_name, TH_F_DETAIL, 0); lv_obj_set_style_text_color(g_hub_name, lv_color_hex(TH_TXT1), 0);
     lv_obj_align(g_hub_name, LV_ALIGN_CENTER, 0, 24);
@@ -208,7 +208,7 @@ void colorpick_create(lv_obj_t *root){
     lv_obj_set_size(g_preview, 54, 54); lv_obj_set_pos(g_preview, 153, 46);
     lv_obj_set_style_radius(g_preview, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(g_preview, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(g_preview, lv_color_hex(0x3A3A3C), 0);
+    lv_obj_set_style_border_color(g_preview, lv_color_hex(TH_TRACK), 0);
     lv_obj_set_style_border_width(g_preview, 2, 0);
     mk_label(g_custom, 118, "Hue");        g_hsl = mk_slider(g_custom, 136, 359);
     mk_label(g_custom, 164, "Saturation"); g_ssl = mk_slider(g_custom, 182, 100);

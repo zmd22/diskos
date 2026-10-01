@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "braun.h"
 #include "theme.h"
 #include "curvelist.h"
 #include "config.h"       /* cfg_get_int/cfg_set_int: persist the BT on/off intent */
@@ -36,7 +37,7 @@
  * profile here is stage 1; confirm real headphone playback with the user. */
 
 static lv_obj_t *g_sw, *g_list, *g_info_list;
-static lv_obj_t *g_hring, *g_hglyph, *g_hname, *g_hsub;   /* the state ring + name + line at the top */
+static lv_obj_t *g_hring, *g_hglyph, *g_hname, *g_hsub, *g_hknob;   /* g_hknob: Braun's status knob */   /* the state ring + name + line at the top */
 static curvelist_t g_bcl;                                  /* curved device rows */
 static lv_timer_t *g_scan_timer;
 static lv_timer_t *g_scanwait_timer;   /* bt_open's non-destructive "wait for adapter then scan" poll */
@@ -63,12 +64,32 @@ static void scan_stop(void){
 
 /* ---- header helpers (local copies) -------------------------------------- */
 
+/* Children we killed but could not reap within ~100 ms (stuck in uninterruptible sleep) are parked here and
+ * retried by later calls, never waited on. (Same idea as upstream diskOS 1.1.3.) */
+#define BT_STUCK_MAX 8
+static pid_t g_bt_stuck[BT_STUCK_MAX];
+static pthread_mutex_t g_bt_stuck_mu = PTHREAD_MUTEX_INITIALIZER;
+static void bt_reap_stuck(void){
+    pthread_mutex_lock(&g_bt_stuck_mu);
+    for(int i = 0; i < BT_STUCK_MAX; i++) if(g_bt_stuck[i] > 0 && waitpid(g_bt_stuck[i], NULL, WNOHANG) != 0) g_bt_stuck[i] = 0;
+    pthread_mutex_unlock(&g_bt_stuck_mu);
+}
+static void bt_reap_bounded(pid_t pid){
+    for(int pass = 0; pass < 2; pass++){
+        for(int i = 0; i < 20; i++){ if(waitpid(pid, NULL, WNOHANG) != 0) return; usleep(5000); }   /* ~100 ms */
+        kill(-pid, SIGKILL); kill(pid, SIGKILL);            /* still there: make sure it is really being killed */
+    }
+    pthread_mutex_lock(&g_bt_stuck_mu);
+    for(int i = 0; i < BT_STUCK_MAX; i++) if(g_bt_stuck[i] <= 0){ g_bt_stuck[i] = pid; break; }
+    pthread_mutex_unlock(&g_bt_stuck_mu);
+}
 /* Run a shell command and capture its output, but never wait longer than `ms`: bluetoothctl blocks
  * indefinitely when bluetoothd is wedged, and an unbounded popen() here froze the UI (called from
  * timers) or left the device-list worker stuck forever, so the list never refreshed again. The child
  * gets its own process group so a timeout kills the whole pipeline. Returns bytes read, -1 on timeout. */
 static int run_cap_to(const char *cmd, char *out, int cap, int ms){
     out[0] = 0;
+    bt_reap_stuck();
     int fd[2]; if(pipe(fd) != 0) return 0;
     posix_spawn_file_actions_t fa; posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_adddup2(&fa, fd[1], 1);
@@ -94,8 +115,8 @@ static int run_cap_to(const char *cmd, char *out, int cap, int ms){
         n += (int)r; if(n >= cap - 1) break;
     }
     close(fd[0]);
-    if(timed_out){ kill(-pid, SIGKILL); fprintf(stderr, "bt: timed out after %d ms: %s\n", ms, cmd); }
-    waitpid(pid, NULL, 0);
+    if(timed_out){ kill(-pid, SIGKILL); kill(pid, SIGKILL); fprintf(stderr, "bt: timed out after %d ms: %s\n", ms, cmd); }
+    bt_reap_bounded(pid);                                   /* never an unbounded waitpid(): a child stuck in the kernel is parked, not waited on */
     out[n] = 0;
     return timed_out ? -1 : n;
 }
@@ -106,6 +127,12 @@ static int run_cap(const char *cmd, char *out, int cap){ int n = run_cap_to(cmd,
 static void hring_spin_exec(void *var, int32_t v){ lv_arc_set_rotation((lv_obj_t *)var, v % 360); }
 static void hdr_set(int state, const char *name, const char *sub){
     if(!g_hring) return;
+    if(g_hknob){                                                   /* Braun: the knob's pointer + lamp say it */
+        br_knob_set_on(g_hknob, state == BT_ON);
+        lv_label_set_text(g_hname, name ? name : ""); lv_label_set_text(g_hsub, sub ? sub : "");
+        lv_obj_set_style_text_color(g_hname, lv_color_hex(state == BT_OFF ? BR_TXT2 : BR_TXT), 0);
+        return;
+    }
     lv_anim_delete(g_hring, hring_spin_exec);
     lv_arc_set_rotation(g_hring, 270);
     lv_arc_set_value(g_hring, state == BT_ON ? 1000 : state == BT_TURNING_ON ? 260 : 0);
@@ -129,7 +156,7 @@ static void list_msg(const char *m){
     lv_obj_set_flex_align(g_list, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_t *e = lv_label_create(g_list);
     lv_label_set_text(e, m);
-    lv_obj_set_style_text_color(e, lv_color_hex(0x8E8E93), 0);
+    lv_obj_set_style_text_color(e, lv_color_hex(TH_MUTED), 0);
     lv_obj_set_style_text_font(e, &lv_font_montserrat_14, 0);
 }
 /* "Scanning" + a spinning refresh glyph, centered in the list area */
@@ -147,13 +174,13 @@ static void list_msg_scanning(void){
     lv_obj_set_style_pad_column(row, 8, 0);
     lv_obj_t *t = lv_label_create(row);
     lv_label_set_text(t, "Scanning");
-    lv_obj_set_style_text_color(t, lv_color_hex(0x8E8E93), 0);
+    lv_obj_set_style_text_color(t, lv_color_hex(TH_MUTED), 0);
     lv_obj_set_style_text_font(t, &lv_font_montserrat_14, 0);
     lv_obj_t *ic = lv_label_create(row);
     lv_label_set_text(ic, LV_SYMBOL_REFRESH);
     lv_obj_set_size(ic, 24, 24);
     lv_obj_set_style_text_align(ic, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(ic, lv_color_hex(0x8E8E93), 0);
+    lv_obj_set_style_text_color(ic, lv_color_hex(TH_MUTED), 0);
     lv_obj_set_style_text_font(ic, &lv_font_montserrat_14, 0);
     g_scan_icon = ic;
     lv_obj_set_style_transform_pivot_x(ic, lv_pct(50), 0);
@@ -211,11 +238,14 @@ int bt_state(void){
 }
 
 /* powered = bluetoothd up AND adapter Powered: yes */
+static int g_bt_powered_last = 1;     /* last answer of `bluetoothctl show`; kept when a probe times out */
 static int bt_on(void){
-    char b[64]; run_cap("pidof bluetoothd 2>/dev/null", b, sizeof b);
-    if(!b[0]) return 0;
-    char s[2048]; run_cap("bluetoothctl show 2>/dev/null", s, sizeof s);
-    return strstr(s, "Powered: yes") != NULL;
+    if(!proc_running("bluetoothd")) return 0;                  /* /proc read: cannot hang */
+    char s[2048];
+    int n = run_cap_to("bluetoothctl show 2>/dev/null", s, sizeof s, 600);   /* UI thread: a wedged bluetoothd must not freeze it */
+    if(n < 0) return g_bt_powered_last;                        /* no answer in time: don't flip the radio's state on a slow probe */
+    g_bt_powered_last = strstr(s, "Powered: yes") != NULL;
+    return g_bt_powered_last;
 }
 
 /* Cheap "is the BT radio enabled?" for the status icon + QS tile: reads the bluetooth rfkill soft-block
@@ -267,6 +297,7 @@ static void bt_enable(void){
     system("touch /tmp/bt_enabling 2>/dev/null");
     system(
         "( T(){ \"$@\" & p=$!; ( sleep 6; kill -9 $p 2>/dev/null ) & w=$!; wait $p; kill $w 2>/dev/null; }; "   /* 6 s cap per bluetoothctl */
+        "  i=0; while [ -e /tmp/bt_disabling ] && [ \"$i\" -lt 40 ]; do sleep 0.25; i=$((i+1)); done; "   /* let a just-started teardown finish first (it would kill this bring-up) */
         "  killall -9 fiio_bluetoothctl brcm_patchram_plus bluetoothd bluealsa 2>/dev/null; "
         "  hciconfig hci0 down 2>/dev/null; "
         /* power-cycle the BT core (BT_REG_ON via rfkill) BEFORE patchram, so the chip
@@ -303,10 +334,16 @@ static void bt_disable(void){
     scan_abort();          /* cancel any pending/active scan + the bt_open observer (covers the radio-timeout
                             * OFF path, which reaches here without a caller-side scan_abort) */
     bt_autoroute_stop();
-    system("rm -f /tmp/bt_enabling; "     /* cancel any in-flight bt_enable() subshell first */
+    /* The teardown runs in a BACKGROUND subshell so the UI never waits on it, and kills the daemons FIRST (no
+     * D-Bus round trip that a wedged bluetoothd could stall). The enable marker goes right now, so an in-flight
+     * bt_enable() subshell aborts; /tmp/bt_disabling tells a bring-up that follows to wait for this to finish.
+     * (Same approach as upstream diskOS 1.1.3.) */
+    unlink("/tmp/bt_enabling");
+    { FILE *m = fopen("/tmp/bt_disabling", "w"); if(m) fclose(m); }
+    system("( killall -9 bluealsa bluetoothd brcm_patchram_plus fiio_bluetoothctl bt-agent 2>/dev/null; "
            "hciconfig hci0 down >/dev/null 2>&1; "
-           "killall bluealsa bluetoothd brcm_patchram_plus fiio_bluetoothctl bt-agent 2>/dev/null; "
-           "rfkill block bluetooth >/dev/null 2>&1");
+           "rfkill block bluetooth >/dev/null 2>&1; "
+           "rm -f /tmp/bt_disabling ) >/dev/null 2>&1 &");
 }
 
 /* A Bluetooth MAC must be exactly AA:BB:CC:DD:EE:FF (hex + colons) before it is ever
@@ -332,21 +369,22 @@ static void bt_autoroute_poll_cb(lv_timer_t *t){
      * meanwhile, so g_bt_autorouted is not latched and the retry stands). */
     char path[256], mac[20];
     int found = 0;
-    FILE *p = popen("bluealsa-cli list-pcms 2>/dev/null | grep -m1 a2dpsrc", "r");
-    if(p){
-        if(fgets(path, sizeof path, p)){
-            char *dev = strstr(path, "dev_");
-            if(dev){
-                dev += 4;
-                char *slash = strchr(dev, '/');
-                if(slash && slash - dev == 17){
-                    memcpy(mac, dev, 17); mac[17] = 0;
-                    for(int i = 0; i < 17; i++) if(mac[i] == '_') mac[i] = ':';
-                    found = bt_mac_valid(mac);
-                }
+    /* bounded: bluealsa-cli talks to bluealsa over D-Bus and can stall when it is busy or wedged (a paired speaker
+     * that is on but not connecting); this runs on a 3 s timer on the UI thread, and it used to be an unbounded
+     * popen(). A probe that gets no answer in time changes nothing (the current route is kept). */
+    int n = run_cap_to("bluealsa-cli list-pcms 2>/dev/null | grep -m1 a2dpsrc", path, sizeof path, 500);
+    if(n < 0) return;
+    if(n > 0){
+        char *dev = strstr(path, "dev_");
+        if(dev){
+            dev += 4;
+            char *slash = strchr(dev, '/');
+            if(slash && slash - dev == 17){
+                memcpy(mac, dev, 17); mac[17] = 0;
+                for(int i = 0; i < 17; i++) if(mac[i] == '_') mac[i] = ':';
+                found = bt_mac_valid(mac);
             }
         }
-        pclose(p);
     }
     if(!found){ g_bt_autorouted[0] = 0; return; }
     if(strcmp(mac, g_bt_autorouted)){
@@ -396,7 +434,7 @@ static int bt_dev_connected(const char *mac){
     if(!bt_mac_valid(mac)) return 0;
     char cmd[160], buf[2048];
     snprintf(cmd, sizeof cmd, "bluetoothctl info %s 2>/dev/null", mac);
-    run_cap(cmd, buf, sizeof buf);
+    if(run_cap_to(cmd, buf, sizeof buf, 1000) < 0) return 0;   /* UI thread, polled every 1.5 s: no long stalls; the next tick asks again */
     /* match the "Connected:" PROPERTY line (after indentation), not a Name:/Alias:
      * that merely contains the text "Connected: yes". */
     for(char *l = buf; l && *l; ){
@@ -459,27 +497,157 @@ static void bt_disconnect(const char *mac){
     ui_toast("Disconnecting...");
 }
 
+/* ---- Bluetooth codec: apply the Settings > Audio > BT Codec choice, with a fallback chain ---------------------
+ * Settings value (cfg "bt_codec"): 0 LDAC Balanced (default), 1 LDAC Quality, 2 LDAC Connection, 3 AAC, 4 SBC.
+ * The player is told the choice with its own codec frame at route time (ui_route_bt, as the stock UI does; that
+ * also picks the LDAC quality). This worker then checks what bluealsa really selected for the speaker and, when it
+ * is not the wanted codec, asks bluealsa for it. If the speaker does not offer it, it falls back along
+ * LDAC -> AAC -> SBC (SBC is mandatory in A2DP, so it is always the last resort). Runs on its own short thread
+ * with every command time-limited; the UI thread only polls its result (for one toast). */
+typedef struct { char mac[20]; int setting; } cx_job_t;
+static pthread_mutex_t g_cx_mu = PTHREAD_MUTEX_INITIALIZER;
+static int  g_cx_running = 0, g_cx_done = 0, g_cx_ok = 0, g_cx_used = 0, g_cx_pending = 0;   /* [g_cx_mu] */
+static char g_cx_final[16], g_cx_want[16], g_cx_pend_mac[20];
+static lv_timer_t *g_cx_timer;
+static int cx_read(const char *pcm, char *avail, int acap, char *sel, int scap){   /* 1 = got an answer */
+    char cmd[200], buf[1024];
+    avail[0] = 0; sel[0] = 0;
+    snprintf(cmd, sizeof cmd, "bluealsa-cli info %s 2>/dev/null", pcm);
+    if(run_cap_to(cmd, buf, sizeof buf, 1500) <= 0) return 0;
+    char v[64];
+    if(bt_info_prop(buf, "Available codecs:", v, sizeof v)) snprintf(avail, (size_t)acap, " %s ", v);
+    if(bt_info_prop(buf, "Selected codec:", v, sizeof v)){
+        int k = 0; while(v[k] && v[k] != ' ' && v[k] != ':' && k < scap - 1){ sel[k] = (v[k] >= 'a' && v[k] <= 'z') ? (char)(v[k] - 32) : v[k]; k++; }
+        sel[k] = 0;
+    }
+    return sel[0] != 0;
+}
+static void *cx_worker(void *arg){
+    cx_job_t job = *(cx_job_t *)arg; free(arg);
+    static const char *const CH_LDAC[] = { "LDAC", "AAC", "SBC" }, *const CH_AAC[] = { "AAC", "SBC" }, *const CH_SBC[] = { "SBC" };
+    const char *const *chain = job.setting <= 2 ? CH_LDAC : job.setting == 3 ? CH_AAC : CH_SBC;
+    int nchain = job.setting <= 2 ? 3 : job.setting == 3 ? 2 : 1;
+    char m[20]; int i = 0;
+    for(; job.mac[i] && i < 17; i++) m[i] = (job.mac[i] == ':') ? '_' : job.mac[i];
+    m[i] = 0;
+    char pcm[96]; snprintf(pcm, sizeof pcm, "/org/bluealsa/hci0/dev_%s/a2dpsrc/sink", m);
+    char avail[96], sel[16] = "", cmd[200], out[256]; int ok = 0, used = 0;
+    usleep(2500 * 1000);                                   /* let the player's own codec step and the link settle */
+    int got = 0;
+    for(int t = 0; t < 4 && !got; t++){ got = cx_read(pcm, avail, sizeof avail, sel, sizeof sel); if(!got) usleep(1000 * 1000); }
+    for(int ci = 0; got && ci < nchain && !ok; ci++){
+        const char *name = chain[ci]; char pat[24]; snprintf(pat, sizeof pat, " %s ", name);
+        used = ci;
+        if(!strcmp(sel, name)){ ok = 1; break; }
+        if(!strstr(avail, pat)) continue;                  /* the speaker does not offer it */
+        snprintf(cmd, sizeof cmd, "bluealsa-cli codec %s %s 2>&1", pcm, name);
+        run_cap_to(cmd, out, sizeof out, 4000);
+        usleep(1500 * 1000);
+        if(cx_read(pcm, avail, sizeof avail, sel, sizeof sel) && !strcmp(sel, name)) ok = 1;
+    }
+    pthread_mutex_lock(&g_cx_mu);
+    g_cx_ok = ok; g_cx_used = used; snprintf(g_cx_final, sizeof g_cx_final, "%s", sel);
+    snprintf(g_cx_want, sizeof g_cx_want, "%s", chain[0]);
+    g_cx_done = 1; g_cx_running = 0;
+    pthread_mutex_unlock(&g_cx_mu);
+    return NULL;
+}
+static void cx_poll_cb(lv_timer_t *t){
+    (void)t;
+    int done, ok, used, pend = 0; char fin[16], want[16], pm[20];
+    pthread_mutex_lock(&g_cx_mu);
+    done = g_cx_done; ok = g_cx_ok; used = g_cx_used;
+    snprintf(fin, sizeof fin, "%s", g_cx_final); snprintf(want, sizeof want, "%s", g_cx_want);
+    if(done){ g_cx_done = 0; pend = g_cx_pending; g_cx_pending = 0; snprintf(pm, sizeof pm, "%s", g_cx_pend_mac); }
+    pthread_mutex_unlock(&g_cx_mu);
+    if(!done) return;
+    lv_timer_del(g_cx_timer); g_cx_timer = NULL;
+    if(ok && used > 0){ char b[64]; snprintf(b, sizeof b, "%s not available - using %s", want, fin); ui_toast(b); }
+    if(pend) bt_codec_apply_async(pm);                     /* the setting changed while this ran: go again */
+}
+void bt_codec_apply_async(const char *mac){
+    if(!bt_mac_valid(mac)) return;
+    pthread_mutex_lock(&g_cx_mu);
+    if(g_cx_running){ g_cx_pending = 1; snprintf(g_cx_pend_mac, sizeof g_cx_pend_mac, "%s", mac); pthread_mutex_unlock(&g_cx_mu); return; }
+    g_cx_running = 1; g_cx_done = 0;
+    pthread_mutex_unlock(&g_cx_mu);
+    cx_job_t *job = calloc(1, sizeof *job);
+    pthread_t th;
+    if(job){ snprintf(job->mac, sizeof job->mac, "%s", mac); job->setting = cfg_get_int("bt_codec", 0); }
+    if(!job || pthread_create(&th, NULL, cx_worker, job) != 0){
+        free(job); pthread_mutex_lock(&g_cx_mu); g_cx_running = 0; pthread_mutex_unlock(&g_cx_mu); return;
+    }
+    pthread_detach(th);
+    if(!g_cx_timer) g_cx_timer = lv_timer_create(cx_poll_cb, 500, NULL);
+}
+
+/* The connected device (any kind: a phone in BT-receiving mode, a speaker when streaming), found by a bounded
+ * background probe so the UI thread never waits on bluetoothctl. Cached; re-probed at most every 4 s. */
+static pthread_mutex_t g_pr_mu = PTHREAD_MUTEX_INITIALIZER;
+static char g_pr_name[64]; static int g_pr_conn = 0, g_pr_running = 0; static uint32_t g_pr_at = 0, g_pr_have = 0;
+static void *peer_worker(void *a){
+    (void)a; char buf[4096], name[64] = {0}; int conn = 0;
+    if(run_cap_to("bluetoothctl devices 2>/dev/null", buf, sizeof buf, 2500) > 0){
+        char *l = buf; int tried = 0;
+        while(l && *l && !conn && tried < 8){
+            char *nl = strchr(l, '\n'); if(nl) *nl = 0;
+            if(!strncmp(l, "Device ", 7) && strlen(l) > 7 + 17){
+                char mac[20]; memcpy(mac, l + 7, 17); mac[17] = 0;
+                if(bt_mac_valid(mac)){
+                    char cmd[128], info[2048], cv[16]; tried++;
+                    snprintf(cmd, sizeof cmd, "bluetoothctl info %s 2>/dev/null", mac);
+                    if(run_cap_to(cmd, info, sizeof info, 1500) < 0) break;
+                    if(bt_info_prop(info, "Connected:", cv, sizeof cv) && !strcmp(cv, "yes")){
+                        conn = 1; snprintf(name, sizeof name, "%s", l + 7 + 17 + 1);
+                    }
+                }
+            }
+            if(!nl) break; l = nl + 1;
+        }
+    }
+    pthread_mutex_lock(&g_pr_mu);
+    g_pr_conn = conn; snprintf(g_pr_name, sizeof g_pr_name, "%s", name); g_pr_have = 1; g_pr_running = 0;
+    pthread_mutex_unlock(&g_pr_mu);
+    return NULL;
+}
+int bt_peer_name(char *out, int cap){
+    if(cap > 0) out[0] = 0;
+    if(bt_state() != BT_ON) return 0;
+    int spawn = 0, conn;
+    pthread_mutex_lock(&g_pr_mu);
+    if(!g_pr_running && (!g_pr_have || lv_tick_elaps(g_pr_at) > 8000)){ g_pr_running = 1; spawn = 1; }
+    conn = g_pr_conn; if(cap > 0) snprintf(out, (size_t)cap, "%s", g_pr_name);
+    pthread_mutex_unlock(&g_pr_mu);
+    if(spawn){
+        g_pr_at = lv_tick_get();
+        pthread_t th;
+        if(pthread_create(&th, NULL, peer_worker, NULL) == 0) pthread_detach(th);
+        else { pthread_mutex_lock(&g_pr_mu); g_pr_running = 0; pthread_mutex_unlock(&g_pr_mu); }
+    }
+    return conn;
+}
+
 /* ---- details screen (SCR_BT_INFO) --------------------------------------- */
 static void info_row(const char *key, const char *val){
     lv_obj_t *r = lv_obj_create(g_info_list);
     lv_obj_remove_style_all(r);
     lv_obj_set_size(r, 250, 40);
     lv_obj_set_style_radius(r, 8, 0);
-    lv_obj_set_style_bg_color(r, lv_color_hex(0x1C1C1E), 0);
+    lv_obj_set_style_bg_color(r, lv_color_hex(TH_SURF1), 0);
     lv_obj_set_style_bg_opa(r, LV_OPA_50, 0);
     lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *k = lv_label_create(r);
     lv_label_set_text(k, key);
     lv_obj_set_pos(k, 12, 11);
     lv_obj_set_style_text_font(k, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(k, lv_color_hex(0x8E8E93), 0);
+    lv_obj_set_style_text_color(k, lv_color_hex(TH_MUTED), 0);
     lv_obj_t *v = lv_label_create(r);
     lv_label_set_text(v, val && val[0] ? val : "-");
     lv_label_set_long_mode(v, LV_LABEL_LONG_DOT);
     lv_obj_set_pos(v, 96, 11); lv_obj_set_size(v, 142, 18);
     lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_style_text_font(v, ui_font_cjk(14), 0);   /* "Name" value = device name: Cyrillic/CJK-capable (issue #3) */
-    lv_obj_set_style_text_color(v, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(v, lv_color_hex(TH_TXT1), 0);
 }
 /* Forget (unpair + untrust) the selected device, then return to the list + rescan (C13). */
 static void info_forget_cb(lv_event_t *e){
@@ -523,7 +691,7 @@ static void info_disc_cb(lv_event_t *e){
 static void info_back_cb(lv_event_t *e){ if(lv_event_get_code(e)==LV_EVENT_CLICKED) screen_back(); }
 
 void bt_info_create(lv_obj_t *root){
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
     ui_header_cb(root, "Device", info_back_cb);   /* shared header */
     g_info_list = lv_obj_create(root);
@@ -596,7 +764,7 @@ static void dev_cb(lv_event_t *e){
 }
 
 #define BROW_W 268
-static void add_dev_row(const char *mac, const char *name, int connected){
+static void add_dev_row(const char *mac, const char *name, int connected, const char *codec){
     lv_obj_t *r = lv_button_create(g_list);
     lv_obj_remove_style_all(r);
     lv_obj_set_size(r, BROW_W, 54);
@@ -623,7 +791,8 @@ static void add_dev_row(const char *mac, const char *name, int connected){
     lv_obj_set_style_text_font(t, ui_font_cjk(18), 0);       /* BT device names are user data: Cyrillic/CJK-capable (issue #3) */
     lv_obj_set_style_text_color(t, lv_color_hex(TH_TXT1), 0);
     lv_obj_t *sl = lv_label_create(r);
-    lv_label_set_text(sl, connected ? "Connected" : "Tap to connect");
+    char st[40]; snprintf(st, sizeof st, "Connected%s%s", (codec && codec[0]) ? " - " : "", (codec && codec[0]) ? codec : "");
+    lv_label_set_text(sl, connected ? st : "Tap to connect");
     lv_obj_set_pos(sl, 42, 31);
     lv_obj_set_style_text_font(sl, TH_F_DETAIL, 0);
     lv_obj_set_style_text_color(sl, connected ? ui_current_accent() : lv_color_hex(TH_TXT2), 0);
@@ -640,7 +809,26 @@ static void add_dev_row(const char *mac, const char *name, int connected){
  * the LVGL loop for seconds (H5) and risked the fiio_init hardware watchdog. The worker
  * builds ONLY plain data; the main thread renders rows from it (LVGL is main-thread-only).
  * A generation counter drops a superseded worker's result if a newer scan started. */
-typedef struct { char mac[20]; char name[128]; int connected; } bt_scan_dev_t;
+/* The A2DP codec in use for a connected device, e.g. "SBC": read from bluealsa's PCM for that device (the line
+ * "Codec:" / "Selected codec:" of `bluealsa-cli info`). Runs on the scan worker thread, bounded; "" when unknown. */
+static void bt_codec_of(const char *mac, char *out, int cap){
+    if(cap < 1) return;
+    out[0] = 0;
+    char m[20]; int i = 0;
+    for(; mac[i] && i < 17; i++) m[i] = (mac[i] == ':') ? '_' : mac[i];
+    m[i] = 0;
+    char cmd[200], buf[160];
+    snprintf(cmd, sizeof cmd, "bluealsa-cli info /org/bluealsa/hci0/dev_%s/a2dpsrc/sink 2>/dev/null | grep -i -E '^[[:space:]]*(selected )?codec:' | head -1", m);
+    if(run_cap_to(cmd, buf, sizeof buf, 1500) <= 0) return;
+    char *c = strchr(buf, ':'); if(!c) return;
+    c++; while(*c == ' ' || *c == '\t') c++;
+    int k = 0;
+    while(*c && k < cap - 1 && ((*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '-')){
+        out[k++] = (*c >= 'a' && *c <= 'z') ? (char)(*c - 32) : *c; c++;
+    }
+    out[k] = 0;
+}
+typedef struct { char mac[20]; char name[128]; int connected; char codec[16]; } bt_scan_dev_t;
 static pthread_mutex_t g_scan_mu = PTHREAD_MUTEX_INITIALIZER;
 static bt_scan_dev_t   g_scan_res[40];
 static int             g_scan_n = 0;         /* [g_scan_mu] result count */
@@ -671,6 +859,8 @@ static void *scan_worker(void *arg){
                     snprintf(res[n].mac,  sizeof res[n].mac,  "%s", mac);
                     snprintf(res[n].name, sizeof res[n].name, "%s", name);
                     res[n].connected = (bt_info_prop(info,"Connected:",cv,sizeof cv) && !strcmp(cv,"yes"));
+                    res[n].codec[0] = 0;
+                    if(res[n].connected) bt_codec_of(mac, res[n].codec, sizeof res[n].codec);
                     n++;
                 }
             }
@@ -701,13 +891,14 @@ static void scan_render(void){
     n = g_scan_n; if(n > 40) n = 40;
     memcpy(local, g_scan_res, (size_t)n * sizeof(bt_scan_dev_t));
     pthread_mutex_unlock(&g_scan_mu);
-    for(int i = 0; i < n; i++) if(local[i].connected)  add_dev_row(local[i].mac, local[i].name, 1);  /* connected first */
-    for(int i = 0; i < n; i++) if(!local[i].connected) add_dev_row(local[i].mac, local[i].name, 0);
+    for(int i = 0; i < n; i++) if(local[i].connected)  add_dev_row(local[i].mac, local[i].name, 1, local[i].codec);  /* connected first */
+    for(int i = 0; i < n; i++) if(!local[i].connected) add_dev_row(local[i].mac, local[i].name, 0, NULL);
     if(n == 0) list_msg("No audio devices found");
     else { lv_obj_update_layout(g_list); curvelist_update(&g_bcl); }
-    {   const char *cn = NULL;
-        for(int i = 0; i < n; i++) if(local[i].connected){ cn = local[i].name; break; }
-        hdr_set(BT_ON, cn ? cn : "Bluetooth is on", cn ? "Connected" : "Connect a speaker to play audio (beta)"); }
+    {   const char *cn = NULL, *cc = NULL;
+        for(int i = 0; i < n; i++) if(local[i].connected){ cn = local[i].name; cc = local[i].codec; break; }
+        char hs[40]; snprintf(hs, sizeof hs, "Connected%s%s", (cc && cc[0]) ? " - " : "", (cc && cc[0]) ? cc : "");
+        hdr_set(BT_ON, cn ? cn : "Bluetooth is on", cn ? hs : "Connect a speaker to play audio (beta)"); }
     /* NOTE: audio output routing to the BT sink is intentionally DISABLED.
      * bluez+bluealsa does SBC encoding in software, which is too heavy for this
      * MIPS CPU (laggy audio + watchdog reboots), and the 0666 output-mux command
@@ -846,6 +1037,12 @@ int bt_toggle(void){
     cfg_set_int("bt_on", on);
     if(on){
         bt_enable();
+        /* like the BT screen's switch: poll for readiness, then start the audio auto-route and a scan (turning BT on
+         * from Quick Settings used to start neither, so a reconnecting speaker was never routed to). Same as upstream 1.1.3. */
+        g_radio_start = lv_tick_get();
+        if(g_scanwait_timer){ lv_timer_del(g_scanwait_timer); g_scanwait_timer = NULL; }
+        if(g_radio_timer) lv_timer_del(g_radio_timer);
+        g_radio_timer = lv_timer_create(radio_on_poll_cb, 1000, NULL);
     } else {
         if(g_radio_timer){ lv_timer_del(g_radio_timer); g_radio_timer = NULL; }        /* cancel the bring-up poll too */
         if(g_bt_conn_timer){ lv_timer_del(g_bt_conn_timer); g_bt_conn_timer = NULL; }  /* don't let it scan_kick() after BT off */
@@ -963,6 +1160,22 @@ void bt_create(lv_obj_t *root){
     lv_obj_add_flag(g_list, LV_OBJ_FLAG_SCROLL_MOMENTUM);
     curvelist_attach(&g_bcl, g_list, root, BROW_W);
     hdr_set(BT_OFF, "Bluetooth", "");
+    if(th_braun()){
+        lv_obj_add_flag(g_hring, LV_OBJ_FLAG_HIDDEN); lv_obj_add_flag(g_hglyph, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_t *pd = br_disc(root, 180, 80, 44, BR_PANEL); (void)pd;
+        g_hknob = br_knob(root, 180, 76, 30, LV_SYMBOL_BLUETOOTH, &lv_font_montserrat_20);
+        br_style_switch(g_sw);
+        lv_obj_set_style_text_color(g_hname, lv_color_hex(BR_TXT), 0); lv_obj_set_style_text_font(g_hname, br_font(18, 1), 0);
+        lv_obj_set_style_text_color(g_hsub, lv_color_hex(BR_TXT2), 0); lv_obj_set_style_text_font(g_hsub, br_font(12, 0), 0);
+        for(uint32_t k = 0; k < lv_obj_get_child_count(root); k++){      /* the rescan button: a flat disc */
+            lv_obj_t *o = lv_obj_get_child(root, k);
+            if(lv_obj_check_type(o, &lv_button_class) && lv_obj_get_width(o) == 34){
+                lv_obj_set_style_bg_color(o, lv_color_hex(BR_SURF), 0);
+                lv_obj_t *l = lv_obj_get_child(o, 0); if(l) lv_obj_set_style_text_color(l, lv_color_hex(BR_TXT), 0);
+            }
+        }
+        hdr_set(BT_OFF, "Bluetooth", "");
+    }
 }
 
 /* Non-destructive "wait for the adapter, then scan" poll used when the BT screen is opened while the

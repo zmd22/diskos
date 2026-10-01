@@ -10,6 +10,7 @@
 #include "screens.h"
 #include "musicdb.h"
 #include "theme.h"
+#include "braun.h"
 #include "orbit.h"
 #include "artcache.h"
 #include "ipc.h"
@@ -168,7 +169,7 @@ static lv_obj_t *pill_btn(lv_obj_t *p, const char *txt, uint32_t bg, int x, lv_e
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l = lv_label_create(b); lv_label_set_text(l, txt);
-    lv_obj_set_style_text_font(l, TH_F_DETAIL, 0); lv_obj_set_style_text_color(l, lv_color_hex(TH_TXT1), 0); lv_obj_center(l);
+    lv_obj_set_style_text_font(l, TH_F_DETAIL, 0); lv_obj_set_style_text_color(l, lv_color_hex(bg == TH_ACCENT ? TH_ONACC : TH_TXT1), 0); lv_obj_center(l);   /* white on the accent in both themes (Braun's TXT1 is dark) */
     return b;
 }
 static void confirm(const char *title, const char *detail, const char *yes, void (*on_yes)(void)){
@@ -192,6 +193,8 @@ static void confirm(const char *title, const char *detail, const char *yes, void
     pill_btn(o, "Cancel", TH_SURF1, -60, no_cb);
     pill_btn(o, yes, TH_ACCENT, 60, yes_cb);
 }
+
+void fileops_confirm(const char *title, const char *detail, const char *yes, void (*on_yes)(void)){ confirm(title, detail, yes, on_yes); }   /* generic themed yes/no, used outside file ops */
 
 /* ---------------------------------------------------------------- delete */
 static void do_delete(void){ char p[FO_PATH]; if(path_join(p, sizeof p, g_dir, g_name)) run(OP_DELETE, p, NULL); }
@@ -383,7 +386,7 @@ void fileops_open(const char *dir, const char *name, int is_dir, void (*done)(vo
     static const orbit_item_t it[A_N] = {
         { LV_SYMBOL_EDIT, "Rename" }, { LV_SYMBOL_COPY, "Copy" }, { LV_SYMBOL_UPLOAD, "Move" }, { LV_SYMBOL_TRASH, "Delete" } };
     orbit_create(&g_orb, o, it, A_N, -90 + 45, pick_action);         /* four buttons on the diagonals */
-    lv_obj_set_style_text_color(g_orb.icon[A_DELETE], lv_color_hex(TH_ACCENT), 0);
+    if(!th_braun()) lv_obj_set_style_text_color(g_orb.icon[A_DELETE], lv_color_hex(TH_ACCENT), 0);
     orbit_hub_create(&g_orb, o, hub_cb, is_dir ? LV_SYMBOL_DIRECTORY : LV_SYMBOL_AUDIO, "Cancel");
     lv_obj_t *n = lv_label_create(o);                                 /* what it's about, at the top */
     lv_label_set_text(n, name);

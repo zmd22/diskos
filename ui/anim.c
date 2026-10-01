@@ -1,3 +1,4 @@
+#include "theme.h"
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "anim.h"
@@ -71,7 +72,7 @@ void anim_press(lv_obj_t *o){
 void anim_panel_shadow(lv_obj_t *root){
     lv_obj_set_style_border_side(root, LV_BORDER_SIDE_LEFT, 0);
     lv_obj_set_style_border_width(root, 1, 0);
-    lv_obj_set_style_border_color(root, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_border_color(root, lv_color_hex(TH_TXT1), 0);
     lv_obj_set_style_border_opa(root, 26, 0);   /* ~10% */
 }
 

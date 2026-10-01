@@ -9,6 +9,7 @@
  * (and before an auto power-off). Nothing is recorded while the clock isn't set. */
 #include "screens.h"
 #include "theme.h"
+#include "braun.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -82,12 +83,8 @@ void usage_tick(int screen_on, int playing){
 }
 
 /* ================================ the screen ================================ */
-#define CX 180
-#define CY 180
-#define R0 118                                              /* battery band: 0 % */
-#define R1 168                                              /* 100 % */
-#define RS 106                                              /* screen-on ring */
-#define RP 96                                               /* playing ring */
+/* the dial's geometry: Ring fills the screen; Braun draws a smaller dial on the grille, figures on the segment */
+static int CX = 180, CY = 180, R0 = 118, R1 = 168, RS = 106, RP = 96;
 static lv_obj_t *g_root, *g_canvas, *g_pct, *g_sub, *g_title, *g_leg_s, *g_leg_p, *g_prev, *g_next, *g_hours[4];
 static uint8_t *g_buf;
 static int g_day;                                           /* 0 = last 24 h, 1 = yesterday, ... */
@@ -154,7 +151,7 @@ static void fill_band(uint32_t from, uint32_t to){
             if(lvl[m] < 0) continue;
             float r = R0 + (R1 - R0) * lvl[m] / 100.0f;
             if(d2 > r * r) continue;
-            row[x] = chg[m] ? 0x0F3A1B : 0x2E2E32;                   /* charging: green tint, else soft grey */
+            row[x] = th_braun() ? (chg[m] ? 0xFFC6DEC9 : 0xFFD2CCC2) : (chg[m] ? 0x0F3A1B : 0x2E2E32);   /* charging: green tint, else soft grey */
         }
     }
 }
@@ -162,16 +159,31 @@ static void draw(void){
     if(!g_canvas) return;
     uint32_t from, to; window_of(g_day, &from, &to);
     lv_canvas_fill_bg(g_canvas, lv_color_hex(TH_BG), LV_OPA_COVER);
+    if(th_braun()){                                          /* Braun: the grille, the dial's panel, the lower segment */
+        lv_draw_buf_t *db = lv_canvas_get_draw_buf(g_canvas);
+        if(db){ uint8_t *px = db->data; uint32_t st = db->header.stride;
+            for(int y = 0; y < 360; y++){ uint32_t *row = (uint32_t *)(px + (size_t)y * st);
+                for(int x = 0; x < 360; x++){
+                    int dx = x - CX, dy = y - CY;
+                    if(y >= 252) row[x] = 0xFF000000u | BR_PANEL;
+                    else if(dx * dx + dy * dy <= (R1 + 14) * (R1 + 14)) row[x] = 0xFF000000u | BR_PANEL;
+                    else { int gx = x % 8, gy = y % 8; row[x] = 0xFF000000u | ((gx >= 3 && gx <= 5 && gy >= 3 && gy <= 5 && !(gx != 4 && gy != 4)) ? BR_DOT : BR_BG); }
+                }
+                if(y == 252) for(int x = 0; x < 360; x++) row[x] = 0xFF000000u | BR_RULE;
+            } }
+    }
     fill_band(from, to);
     lv_layer_t L; lv_canvas_init_layer(g_canvas, &L);
-    lv_color_t grid = lv_color_hex(0x28282A), white = lv_color_hex(0xF0F0F5), green = lv_color_hex(0x34C759),
-               amber = lv_color_hex(0xFFD60A), red = lv_color_hex(TH_ACCENT);
-    for(int k = 0; k <= 4; k++) arc(&L, R0 + (R1 - R0) * k / 4.0f, 1, 0, 360, k % 4 ? lv_color_hex(0x1E1E20) : grid, k % 4 ? LV_OPA_60 : LV_OPA_COVER);
-    arc(&L, RS, 5, 0, 360, lv_color_hex(0x1E1E20), LV_OPA_COVER);
-    arc(&L, RP, 5, 0, 360, lv_color_hex(0x1E1E20), LV_OPA_COVER);
+    int br = th_braun();                                     /* Braun: ink on paper - black level line, grey screen-on, orange playing */
+    lv_color_t grid = lv_color_hex(br ? BR_RULE : 0x28282A), white = lv_color_hex(br ? BR_TXT : 0xF0F0F5), green = lv_color_hex(0x34C759),
+               amber = lv_color_hex(br ? BR_TXT2 : 0xFFD60A), red = lv_color_hex(br ? BR_ACC : TH_ACCENT);
+    lv_color_t faint = lv_color_hex(br ? 0xE4DED4 : 0x1E1E20);
+    for(int k = 0; k <= 4; k++) arc(&L, R0 + (R1 - R0) * k / 4.0f, 1, 0, 360, k % 4 ? faint : grid, k % 4 ? LV_OPA_60 : LV_OPA_COVER);
+    arc(&L, RS, br ? 4 : 5, 0, 360, faint, LV_OPA_COVER);
+    arc(&L, RP, br ? 4 : 5, 0, 360, faint, LV_OPA_COVER);
     for(int h = 0; h < 24; h++){                            /* hour ticks, longer every 6 h */
         float a = -90.0f + h * 15.0f;
-        line(&L, pol(R1 + 2, a), pol(h % 6 ? R1 + 5 : R1 + 9, a), h % 6 ? 1 : 2, lv_color_hex(0x636366), LV_OPA_COVER);
+        line(&L, pol(R1 + 2, a), pol(h % 6 ? R1 + 5 : R1 + 9, a), h % 6 ? 1 : 2, lv_color_hex(br && h % 6 == 0 ? BR_TXT : TH_TXT3), LV_OPA_COVER);
     }
     /* samples in the window, oldest first */
     int first = -1, last = -1, scr = 0, play = 0;
@@ -200,9 +212,9 @@ static void draw(void){
         if(run_s >= 0){ float a1 = pa + 0.25f; if(a1 < sa0) a1 += 360; arc(&L, RS, 5, sa0, a1, amber, LV_OPA_COVER); }
         if(run_p >= 0){ float a1 = pa + 0.25f; if(a1 < pa0) a1 += 360; arc(&L, RP, 5, pa0, a1, red, LV_OPA_COVER); }
         if(g_day == 0 && p){                                 /* now: a hairline and a dot on the line */
-            line(&L, pol(R0 - 2, pa), pol(R1 + 10, pa), 1, lv_color_hex(0x8E8E93), LV_OPA_COVER);
+            line(&L, pol(R0 - 2, pa), pol(R1 + 10, pa), 1, lv_color_hex(TH_MUTED), LV_OPA_COVER);
             lv_draw_rect_dsc_t dd; lv_draw_rect_dsc_init(&dd);
-            dd.bg_color = white; dd.radius = LV_RADIUS_CIRCLE; dd.border_color = lv_color_hex(TH_BG); dd.border_width = 2;
+            dd.bg_color = br ? lv_color_hex(BR_ACC) : white; dd.radius = LV_RADIUS_CIRCLE; dd.border_color = lv_color_hex(br ? BR_PANEL : TH_BG); dd.border_width = 2;
             lv_point_precise_t c = pol(pr, pa);
             lv_area_t ar = { (int32_t)c.x - 5, (int32_t)c.y - 5, (int32_t)c.x + 5, (int32_t)c.y + 5 };
             lv_draw_rect(&L, &dd, &ar);
@@ -290,6 +302,7 @@ static lv_obj_t *chev(lv_obj_t *root, const char *sym, int x, lv_event_cb_t cb){
 }
 void usage_create(lv_obj_t *root){
     g_root = root;
+    if(th_braun()){ CX = 180; CY = 124; R0 = 72; R1 = 102; RS = 63; RP = 55; }   /* the smaller dial, on the grille above */
     lv_obj_set_style_bg_color(root, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
     lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
@@ -305,7 +318,7 @@ void usage_create(lv_obj_t *root){
         g_hours[k] = lv_label_create(root);
         lv_label_set_text(g_hours[k], H[k]);
         lv_obj_set_style_text_font(g_hours[k], TH_F_CAPTION, 0);
-        lv_obj_set_style_text_color(g_hours[k], lv_color_hex(0x636366), 0);
+        lv_obj_set_style_text_color(g_hours[k], lv_color_hex(TH_TXT3), 0);
         float a = (-90.0f + k * 90.0f) * 3.14159265f / 180.0f;
         lv_obj_align(g_hours[k], LV_ALIGN_CENTER, (int32_t)(84 * cosf(a)), (int32_t)(84 * sinf(a)));
     }
@@ -328,6 +341,18 @@ void usage_create(lv_obj_t *root){
     g_leg_p = legend(root, TH_ACCENT, 203);
     g_prev = chev(root, LV_SYMBOL_LEFT, -20, prev_cb);       /* older day */
     g_next = chev(root, LV_SYMBOL_RIGHT, 20, next_cb);       /* newer day */
+    if(th_braun()){                                          /* Braun: % and the window inside the dial, the rest on the segment */
+        for(int k = 0; k < 4; k += 2){ float a = (-90.0f + k * 90.0f) * 3.14159265f / 180.0f;
+            lv_obj_set_style_text_font(g_hours[k], br_font(12, 0), 0);
+            lv_obj_align(g_hours[k], LV_ALIGN_CENTER, (int32_t)((R1 + 22) * cosf(a)), (int32_t)(CY - 180 + (R1 + 22) * sinf(a))); }
+        lv_obj_set_style_text_font(g_pct, br_font(22, 1), 0); lv_obj_align(g_pct, LV_ALIGN_TOP_MID, 0, CY - 20);
+        lv_obj_set_style_text_font(g_title, br_font(12, 0), 0); lv_obj_align(g_title, LV_ALIGN_TOP_MID, 0, CY + 8);
+        lv_obj_set_width(g_sub, 250); lv_obj_set_style_text_font(g_sub, br_font(14, 0), 0);
+        lv_obj_set_style_text_color(g_sub, lv_color_hex(BR_TXT), 0); lv_obj_align(g_sub, LV_ALIGN_TOP_MID, 0, 264);
+        lv_obj_align(g_leg_s, LV_ALIGN_TOP_MID, 8, 288); lv_obj_align(g_leg_p, LV_ALIGN_TOP_MID, 8, 306);
+        lv_obj_set_style_bg_color(lv_obj_get_child(g_leg_s, 0), lv_color_hex(BR_TXT2), 0);
+        lv_obj_align(g_prev, LV_ALIGN_TOP_MID, -74, 318); lv_obj_align(g_next, LV_ALIGN_TOP_MID, 74, 318);
+    }
     if(!g_tmr) g_tmr = lv_timer_create(us_tick_cb, 60000, NULL);
 }
 void usage_refresh(void){ g_day = 0; draw(); }               /* shown: back to the last 24 h */

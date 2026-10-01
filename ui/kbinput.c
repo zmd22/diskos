@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright (C) 2026 diskOS contributors */
 #include "screens.h"
+#include "theme.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -127,9 +128,9 @@ static void skb_add(skb_t *c, skb_kind_t kind, uint8_t row, uint8_t col,
     if(kind==SKB_BKSP) lv_obj_add_event_cb(k->btn,skb_key_cb,LV_EVENT_LONG_PRESSED,k);   /* hold to clear all */
     lv_obj_set_style_radius(k->btn,7,0);
     lv_obj_set_style_border_width(k->btn,1,0);
-    lv_obj_set_style_border_color(k->btn,lv_color_hex(0x3A3A3C),0);
+    lv_obj_set_style_border_color(k->btn,lv_color_hex(TH_TRACK),0);
     lv_obj_set_style_bg_color(k->btn,lv_color_hex(0x202022),0);
-    lv_obj_set_style_bg_color(k->btn,lv_color_hex(0x3A3A3C),LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(k->btn,lv_color_hex(TH_TRACK),LV_STATE_PRESSED);
     lv_obj_set_style_bg_color(k->btn,lv_color_hex(0x425a78),LV_STATE_CHECKED);
     lv_obj_set_style_pad_all(k->btn,0,0);
     k->label=lv_label_create(k->btn);
@@ -197,9 +198,9 @@ static void pill(lv_obj_t *parent, int x, int y, const char *sym, lv_color_t col
     lv_obj_align(b, LV_ALIGN_TOP_MID, x, y);
     lv_obj_set_ext_click_area(b, 8);   /* Save/Cancel sit in open space - generous hit area */
     lv_obj_set_style_radius(b, 18, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x2C2C2E), 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(TH_SURF2), 0);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(0x3A3A3C), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(b, lv_color_hex(TH_TRACK), LV_STATE_PRESSED);
     lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l = lv_label_create(b);
     lv_label_set_text(l, sym);
@@ -221,7 +222,7 @@ void kbinput_open(const char *title, const char *initial, kbinput_done_cb_t cb){
     lv_obj_remove_style_all(g_modal);
     lv_obj_set_size(g_modal, 360, 360);
     lv_obj_center(g_modal);
-    lv_obj_set_style_bg_color(g_modal, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(g_modal, lv_color_hex(TH_BG), 0);
     lv_obj_set_style_bg_opa(g_modal, LV_OPA_COVER, 0);
     lv_obj_clear_flag(g_modal, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -234,8 +235,8 @@ void kbinput_open(const char *title, const char *initial, kbinput_done_cb_t cb){
     if(g_mask_next){ lv_textarea_set_password_mode(g_ta, true); g_mask_next = 0; }  /* masked secret entry */
     lv_obj_set_size(g_ta, 240, 40);
     lv_obj_align(g_ta, LV_ALIGN_TOP_MID, 0, 52);
-    lv_obj_set_style_bg_color(g_ta, lv_color_hex(0x1C1C1E), 0);
-    lv_obj_set_style_text_color(g_ta, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_color(g_ta, lv_color_hex(TH_SURF1), 0);
+    lv_obj_set_style_text_color(g_ta, lv_color_hex(TH_TXT1), 0);
     /* typed text and the placeholder ("Password for <SSID>", a playlist name on Rename) are user
      * data: route both parts through the chain so Cyrillic/CJK don't tofu (issue #3). */
     lv_obj_set_style_text_font(g_ta, ui_font_cjk(16), 0);
@@ -248,7 +249,7 @@ void kbinput_open(const char *title, const char *initial, kbinput_done_cb_t cb){
       if(ta_lbl){ lv_obj_set_style_min_height(ta_lbl, 24, 0); lv_obj_set_style_max_height(ta_lbl, 24, 0); } }
 
     /* Cancel / Save in the wide mid-band, above the keyboard */
-    pill(g_modal, -66, 108, LV_SYMBOL_CLOSE, lv_color_hex(0xC7C7CC), cancel_btn);
+    pill(g_modal, -66, 108, LV_SYMBOL_CLOSE, lv_color_hex(TH_SOFT), cancel_btn);
     pill(g_modal,  66, 108, LV_SYMBOL_OK,    lv_color_hex(0x34C759), save_btn);
 
     skb_create(g_modal, g_ta, do_save);   /* the keyboard's OK key also saves */
