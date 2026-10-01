@@ -1,3 +1,41 @@
+# diskOS — reworked UI for the FiiO Snowsky Disc
+
+> **Thank you, [b0hemia](https://github.com/b0hemia)!** This fork stands entirely on [diskOS](https://github.com/b0hemia/diskos).
+> It only replaces the on-device interface (`mq_ui`); the installer below is upstream's, unchanged.
+> **Provided as is, for testing and experimentation only, at your own risk.** Not affiliated with FiiO or upstream diskOS.
+
+A new interface designed for the Disc's round 360×360 screen, in two complete themes you can switch in
+**Settings › Display › Theme**:
+
+* **Ring** (default): black and made for the circle. Progress rings, arcs on the rim, menus that orbit a hub,
+  lists that curve with the edge, and colours taken from the album.
+* **Braun**: a 70s Dieter Rams look. Warm off-white, a speaker-grille texture, dark knobs with indicator lamps,
+  straight lists and a single orange accent.
+
+| | Ring | Braun |
+|---|---|---|
+| Home | <img src="https://github.com/zmd22/diskos/raw/ui-fork/docs/fork/screenshots/01-home.png" width="260"> | <img src="https://github.com/zmd22/diskos/raw/ui-fork/docs/fork/screenshots/braun/01-home.png" width="260"> |
+| Now Playing | <img src="https://github.com/zmd22/diskos/raw/ui-fork/docs/fork/screenshots/02-now-playing.png" width="260"> | <img src="https://github.com/zmd22/diskos/raw/ui-fork/docs/fork/screenshots/braun/02-now-playing.png" width="260"> |
+
+**Highlights:**
+* A Ring-clock Home.
+* An up-next queue.
+* A ten-band parametric-lite equalizer.
+* Synced lyrics and cover tagging.
+* A folder browser with file operations.
+* Shortcuts.
+* A Bluetooth codec picker (LDAC / AAC / SBC).
+* Working-mode status screens.
+* Battery and usage history.
+* Hold any Back control to jump Home.
+
+**Get it:** download `mq_ui` from [Releases](https://github.com/zmd22/diskos/releases) and pass it to the installer below with
+`--ui /path/to/mq_ui`. Every feature with screenshots, the gestures and the design notes are on the
+[`ui-fork` branch](https://github.com/zmd22/diskos/tree/ui-fork): [FORK.md](https://github.com/zmd22/diskos/blob/ui-fork/FORK.md) ·
+[features](https://github.com/zmd22/diskos/blob/ui-fork/docs/fork/FEATURES.md) · [change log](https://github.com/zmd22/diskos/blob/ui-fork/docs/fork/CHANGES.md)
+
+---
+
 <p align="center">
   <img src="docs/assets/diskos-hero.png" alt="diskOS running on a round digital audio player" width="100%">
 </p>
