@@ -4,18 +4,10 @@
 > It only replaces the on-device interface (`mq_ui`); the installer below is upstream's, unchanged.
 > **Provided as is, for testing and experimentation only, at your own risk.** Not affiliated with FiiO or upstream diskOS.
 
-A new interface designed for the Disc's round 360×360 screen, in two complete themes you can switch in
-**Settings › Display › Theme**:
+A new interface designed for the Disc's round 360×360 screen, in three looks you can switch in
+**Settings › Display › Theme** (plus an optional **Auto day/night** for Braun):
 
-* **Ring** (default): black and made for the circle. Progress rings, arcs on the rim, menus that orbit a hub,
-  lists that curve with the edge, and colours taken from the album.
-* **Braun**: a 70s Dieter Rams look. Warm off-white, a speaker-grille texture, dark knobs with indicator lamps,
-  straight lists and a single orange accent.
-
-| | Ring | Braun |
-|---|---|---|
-| Home | <img src="https://github.com/zmd22/diskos/raw/ui-fork/docs/fork/screenshots/01-home.png" width="260"> | <img src="https://github.com/zmd22/diskos/raw/ui-fork/docs/fork/screenshots/braun/01-home.png" width="260"> |
-| Now Playing | <img src="https://github.com/zmd22/diskos/raw/ui-fork/docs/fork/screenshots/02-now-playing.png" width="260"> | <img src="https://github.com/zmd22/diskos/raw/ui-fork/docs/fork/screenshots/braun/02-now-playing.png" width="260"> |
+![Ring, Braun and Braun Dark](https://github.com/zmd22/diskos/raw/ui-fork/docs/fork/screenshots/99-themes.png)
 
 **Highlights:**
 * A Ring-clock Home.
