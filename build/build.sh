@@ -6,8 +6,8 @@
 # installed system-wide.
 #
 # Before building, populate vendor/<os>-<arch>/ with the native tools for this
-# host (see build/README-vendor.md): usbboot, mksquashfs, unsquashfs,
-# my_write5_dram.bin, disc_spl_lpddr3.bin (+ lib/ for any bundled .so/.dylib).
+# host (see build/NATIVE_TOOLS.md): usbboot, mksquashfs, unsquashfs,
+# my_write6_dram.bin, disc_spl_lpddr3.bin (+ lib/ for any bundled .so/.dylib).
 set -euo pipefail
 cd "$(dirname "$0")/.."          # installer/
 
