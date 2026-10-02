@@ -75,8 +75,10 @@ def _set_phase(st, phase):
 def cmd_doctor(args):
     ui.step("diskOS installer - doctor")
     o, a = platform_probe.host()
+    dname = platform_probe.distro_name()
+    host_desc = f"{o}-{a}" + (f" ({dname})" if dname else "")
     ui.info(f"version    : {__version__}")
-    ui.info(f"host       : {o}-{a} ({'supported' if platform_probe.is_supported() else 'UNSUPPORTED'})")
+    ui.info(f"host       : {host_desc} ({'supported' if platform_probe.is_supported() else 'UNSUPPORTED'})")
     ui.info(f"state dir  : {state.state_dir()}")
 
     def _tool_ok(path, need_exec):
@@ -88,7 +90,7 @@ def cmd_doctor(args):
 
     ui.info("native tools and device files:")
     all_ok = True
-    for name in ("usbboot", "mksquashfs", "unsquashfs", "my_write5_dram.bin", "disc_spl_lpddr3.bin"):
+    for name in ("usbboot", "mksquashfs", "unsquashfs", "my_write6_dram.bin", "disc_spl_lpddr3.bin"):
         p = bundle.native(name, required=False)
         need_exec = not name.endswith(".bin")
         ok = bool(p) and _tool_ok(p, need_exec)
@@ -121,6 +123,22 @@ def cmd_doctor(args):
         ui.info("device: none in mask-ROM mode (normal unless you're about to flash)")
     else:
         (ui.ok if n == 1 else ui.warn)(f"device: {n} in mask-ROM mode")
+        access, where = platform_probe.maskrom_access()   # usbboot must be able to OPEN it, not just see it (#10)
+        if access == "ok":
+            ui.ok(f"device: can be opened by this user ({where})")
+        elif access == "denied":
+            ui.err(f"device: this user cannot open it ({where}) - USB permissions")
+            ui.err(f"  fix: {platform_probe.USB_ACCESS_FIX}")
+            all_ok = False
+        else:
+            ui.info(f"device: open check skipped ({where})")
+
+    try:
+        ui.info("OTA state for an image built now: " + imagebuild.describe_ota(imagebuild.resolve_ota_config())
+                + "  [--no-ota forces OFF; --ota-key PATH uses your own key]")
+    except errors.DiskOSError as e:
+        ui.err(f"OTA key configured but unusable: {e}")
+        all_ok = False
 
     st = state.load()
     if st.get("installed"):
@@ -136,7 +154,7 @@ def _cli_confirm(yes):
     y/N - or auto-yes with --yes)."""
     def confirm(summary):
         ui.step("Ready - please confirm")
-        for k in ("action", "variant", "image", "duration", "consequence"):
+        for k in ("action", "variant", "image", "ota", "duration", "consequence", "requires"):
             if summary.get(k):
                 ui.info(f"  {k}: {summary[k]}")
         if yes:
@@ -153,7 +171,8 @@ def cmd_install(args):
         ui.err("[E140] need --firmware <FiiO official update .zip> (or --stock <rootfs.squashfs>).")
         return 2
     params = {"firmware": args.firmware, "stock": args.stock,
-              "ui_binary": args.ui, "variant": args.variant}
+              "ui_binary": args.ui, "variant": args.variant,
+              "ota_rootpub": args.ota_key, "no_ota": args.no_ota}
     r = service.do_install(params, CLIReporter(), _cli_confirm(args.yes))
     if r.get("ok"):
         ui.info("Reboot the device and diskOS installs itself automatically on first boot.")
@@ -204,6 +223,11 @@ def build_parser():
     i.add_argument("--variant", choices=["public", "dev"], default="public",
                    help="public (no always-on shell; Debug Mode enables SSH on demand) or dev (adds an ALWAYS-ON PASSWORDLESS ROOT SHELL over "
                         "USB - anyone with physical access gets root every boot; dev devices only)")
+    og = i.add_mutually_exclusive_group()
+    og.add_argument("--no-ota", action="store_true",
+                    help="build WITHOUT over-the-air updates: no OTA root key is baked, even if $DISKOS_OTA_ROOTPUB or a bundled key exists")
+    og.add_argument("--ota-key", metavar="PATH",
+                    help="bake YOUR OWN OTA root PUBLIC key (PEM, ECDSA P-256); the image then accepts only updates signed by it")
     i.add_argument("-y", "--yes", action="store_true", help="don't prompt before flashing")
     i.set_defaults(func=cmd_install)
 
