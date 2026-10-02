@@ -1,5 +1,5 @@
 """Mask-ROM USB flashing - Python wrapper around the PROVEN native binaries
-(usbboot + the my_write5 DRAM NAND writer + the X2000 SPL). We do NOT reimplement
+(usbboot + the my_write6 DRAM NAND writer + the X2000 SPL). We do NOT reimplement
 the flashing protocol; we orchestrate it, watch it, and interpret the result.
 
 Faithful port of flash_diskos.sh, with the python helper snippets (poison blob,
@@ -14,9 +14,27 @@ import struct
 import subprocess
 import tempfile
 
-from . import bundle, platform_probe
+from . import basegate, bundle, platform_probe
 from .reporter import CLIReporter
-from .errors import FlashError, DEVICE_RESULT_CODES, RECOVERABLE
+from .errors import FlashError, DEVICE_RESULT_CODES, RECOVERABLE, WAIT_THEN_RECOVER
+
+
+class BaseRefused(FlashError):
+    """The writer's base gate refused BEFORE unlocking/erasing anything: the Disc is untouched. `.verdict` holds the
+    parsed gate verdict (basegate.read_verdict), incl. the base the Disc is really on when it is a known one."""
+    code = "E320"
+
+    def __init__(self, message, verdict, **kw):
+        super().__init__(message, **kw)
+        self.verdict = verdict
+
+
+# The ONLY writer this installer will run: flash/my_write6.c built by flash/build_nand.sh (reproducible, byte-exact).
+# Identified by its exact SHA-256 - not by a code offset - so an older writer that would ignore the base plan can
+# never be started. Its descriptor (magic "DGWD") must also agree on protocol, variant and capacity.
+WRITER_NAME = "my_write6_dram.bin"
+WRITER_SHA256 = "a3c3aa63e0c48f501181d542d9fa0526d36ded81e2e767f0c044af876674ea84"
+PLAN_ADDR = "0xa0b00000"
 
 IMG_SIZE = 100663296
 SQUASH_MAGIC = b"hsqs"
@@ -25,12 +43,14 @@ SQUASH_MAGIC = b"hsqs"
 # finishes well inside this on real hardware (validated repeatedly). A too-short wait shows as a
 # not-DONE readback (retry with a longer wait) - it never corrupts the flash. A device with an
 # unusually high bad-block count can raise it via DISKOS_FLASH_WAIT.
-FLASH_WAIT = os.environ.get("DISKOS_FLASH_WAIT", "900")   # 15 min (was 5400/90 min)
-_FLASH_WAIT_SECS = int(FLASH_WAIT) if FLASH_WAIT.isdigit() else 900
+# my_write6 first hashes the ~96 MiB image and ~25 MiB of base partitions from uncached DRAM (time not yet measured on
+# a device), so the wait has 3 min more than my_write5's 15.
+FLASH_WAIT = os.environ.get("DISKOS_FLASH_WAIT", "1080")   # 18 min
+_FLASH_WAIT_SECS = int(FLASH_WAIT) if FLASH_WAIT.isdigit() else 1080
 
 RESULT_NAMES = {code: name for code, (_fcode, name) in DEVICE_RESULT_CODES.items()}
 
-FLASH_EXPECT_SECS = 15 * 60   # ~15 min expected flash duration
+FLASH_EXPECT_SECS = 20 * 60   # ~20 min expected (the base check + image hash add time; not yet measured)
 # Hard ceiling for the whole usbboot invocation: the writer --wait plus margin for the image
 # download + result readback; then treat a still-running usbboot as a hung/reset device and
 # terminate it (E303) rather than blocking forever.
@@ -84,6 +104,12 @@ def preflight(image_path, rep=None):
     if n > 1:
         raise FlashError(f"{n} devices in mask-ROM mode - need exactly 1", code="E111",
                          action="unplug the other Ingenic devices")
+    # Seeing the device is not enough: usbboot must OPEN it (GitHub #10 - counted fine, then E301). Refuse with the
+    # exact fix instead. An unknown result (not Linux, unexpected error) is left to usbboot, which reports itself.
+    access, where = platform_probe.maskrom_access()
+    if access == "denied":
+        raise FlashError(f"the device is in mask-ROM mode but this user cannot open it ({where}) - USB permissions",
+                         code="E113", action=platform_probe.USB_ACCESS_FIX)
     if n < 0:
         # FAIL CLOSED: we could not prove exactly one device (no libusb backend or a
         # permission error). Never cross the destructive gate on an unproven count.
@@ -117,50 +143,73 @@ def _parse_debug(dbg_path):
     }
 
 
-def _writer_capacity(writer_path):
-    """The NAND writer only programs its compiled NLOGBLOCKS logical blocks; a stale writer (the old
-    580-block build) silently TRUNCATES the image and the device still reports success for the part it
-    wrote. Read that capacity from the writer's `addiu $v0, $zero, NLOGBLOCKS` instruction (offset 0x40c)
-    so a mismatch is refused BEFORE any NAND write - not only caught in the post-write readback (E311),
-    by which point the device already holds a truncated, unbootable image. Returns the block count, or
-    None if the writer's layout is unrecognised (caller fails closed)."""
+def _writer_descriptor(writer_path):
+    """(nlogblocks, blob_schema) of the pinned production writer, or None if the file is not exactly it."""
+    import hashlib
     try:
-        with open(writer_path, "rb") as f:
-            f.seek(0x40c)
-            instr = struct.unpack("<I", f.read(4))[0]
-    except Exception:
+        data = open(writer_path, "rb").read()
+    except OSError:
         return None
-    if (instr & 0xFFFF0000) != 0x24020000:   # not `addiu $v0,$zero,imm` -> writer build changed; don't trust the offset
+    if hashlib.sha256(data).hexdigest() != WRITER_SHA256:
         return None
-    return instr & 0xFFFF
+    k = data.find(struct.pack("<I", 0x44574744))              # "DGWD" descriptor
+    if k < 0 or k + 32 > len(data):
+        return None
+    magic, tool, variant, schema, start, nlog, blob, dbg = struct.unpack("<8I", data[k:k + 32])
+    if tool != 6 or variant != 1 or schema != basegate.BLOB_SCHEMA or start != 80 or blob != 0xa0b00000:
+        return None
+    return nlog, schema
 
 
-def flash(image_path, log_path=None, rep=None):
-    """Flash `image_path` to the device via mask-ROM. Returns the parsed debug dict
-    on SUCCESS; raises FlashError otherwise (fail-closed)."""
+def flash(image_path, target_ver, log_path=None, rep=None):
+    """Flash `image_path` (built from firmware `target_ver`'s rootfs) via mask-ROM. The writer first proves ON THE
+    DEVICE that the Disc's kernel + recovery are exactly `target_ver`'s (basegate) and that the image in its memory is
+    this one; only then does it unlock and write. Returns the parsed debug dict on SUCCESS; raises BaseRefused if the
+    gate refused (nothing written), FlashError otherwise (fail-closed)."""
     rep = rep or CLIReporter()
+    launched = [False]
+    try:
+        return _flash(image_path, target_ver, log_path, rep, launched)
+    except FlashError as e:
+        if not launched[0]:
+            e.pre_launch = True                          # usbboot never started: the Disc is untouched
+        raise
+    except Exception as e:
+        if launched[0]:
+            raise
+        # an OS/tool error before usbboot started (temp dir, plan/log file, Popen itself): the Disc is untouched
+        err = FlashError(f"could not start the flash: {e}", code="E304",
+                         action="nothing was sent to the Disc; fix the problem above and retry")
+        err.pre_launch = True
+        raise err from e
+
+
+def _flash(image_path, target_ver, log_path, rep, launched):
     preflight(image_path, rep)
     image_path = os.path.abspath(image_path)
 
     usbboot = bundle.native("usbboot")
-    writer = bundle.native("my_write5_dram.bin")
+    writer = bundle.native(WRITER_NAME)
     spl = bundle.native("disc_spl_lpddr3.bin")
 
     # PRE-WRITE capacity gate: refuse a truncating writer before it touches the NAND (the post-write
     # E311 check is too late - the image is already partially programmed). This is the 580-vs-768 bug.
     need_blocks = IMG_SIZE // (128 * 1024)
-    wcap = _writer_capacity(writer)
-    if wcap is None:
+    desc = _writer_descriptor(writer)
+    if desc is None:
         raise FlashError(
-            "unrecognised NAND writer build - cannot verify its block capacity before flashing; "
-            "refusing to risk a truncated image", code="E123",
+            "the NAND writer is not the exact build this installer was made with - refusing to run it "
+            "(an unknown writer might not check the Disc's firmware base)", code="E123",
             action="use a diskOS installer bundle built by this project")
-    if wcap < need_blocks:
+    wcap = desc[0]
+    if target_ver not in basegate.CATALOGUE:
+        raise FlashError(f"no known firmware base for V{target_ver} - refusing to flash", code="E125",
+                         action="this firmware version is not supported by this installer")
+    if wcap != need_blocks:
         raise FlashError(
-            f"NAND writer covers only {wcap} x 128 KB blocks but the image needs {need_blocks} - "
-            f"flashing WOULD TRUNCATE the image (nothing has been written). This is the 580-vs-768 "
-            f"writer bug.", code="E124",
-            action=f"reconcile my_write5 to NLOGBLOCKS>={need_blocks} and rebuild the bundle")
+            f"NAND writer covers {wcap} x 128 KB blocks but the image is exactly {need_blocks} - the writer "
+            f"and the image must match exactly (nothing has been written).", code="E124",
+            action=f"rebuild my_write6 with NLOGBLOCKS={need_blocks} (flash/build_nand.sh) and the bundle")
     rep.log(f"writer capacity (pre-write): {wcap} blocks (image needs {need_blocks})")
 
     tmp = tempfile.mkdtemp(prefix="diskos-flash-")
@@ -168,21 +217,26 @@ def flash(image_path, log_path=None, rep=None):
     dbg = os.path.join(tmp, "dbg.bin")
     with open(poison, "wb") as f:
         f.write(b"\xee" * 128)
+    plan = os.path.join(tmp, "plan.bin")
+    with open(plan, "wb") as f:
+        f.write(basegate.build_plan(target_ver, image_path))     # binds the base AND this exact image
+    rep.log(f"base required on the Disc: {basegate.CATALOGUE[target_ver]['name']}")
 
     cmd = [
         usbboot, "-v", "--cpu", "x2000", "--stage1", spl, "--wait", "2",
         "--addr", "0xa0c00000", "--download", writer,
         "--addr", "0xa1000000", "--download", image_path,
+        "--addr", PLAN_ADDR, "--download", plan,
         "--addr", "0xa0a00000", "--download", poison,
         "--start1", "0xa0c00030", "--wait", FLASH_WAIT,
         "--addr", "0xa0a00000", "--length", "0x400", "--upload", dbg,
     ]
 
-    rep.phase("Flashing diskOS (mask-ROM) - ~15 minutes", destructive=True)
+    rep.phase("Flashing (mask-ROM) - about 20 minutes", destructive=True)
     rep.warning("Do NOT disconnect the device or let the host sleep during the flash.")
 
     logf = open(log_path, "w") if log_path else open(os.path.join(tmp, "flash.log"), "w")
-    rep.indeterminate(True, note="flashing (scan → erase → program → verify → retry)",
+    rep.indeterminate(True, note="flashing (scan -> erase -> program -> verify -> retry)",
                       expect_secs=FLASH_EXPECT_SECS)
     try:
         try:
@@ -191,11 +245,13 @@ def flash(image_path, log_path=None, rep=None):
                 # to a file (never a pipe) so a closed reader can't deadlock or kill it.
                 proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
                                         env=bundle.native_env(cmd[0]), start_new_session=True)
+                launched[0] = True                       # usbboot is running: from here on the Disc may be written
 
                 def _kill_flasher():
                     # The flasher runs in its OWN session (start_new_session) so a parent SIGPIPE
-                    # can't kill it mid-write - but that also means it SURVIVES us. Kill the whole
-                    # process group so NAND writes actually stop, then reap without blocking.
+                    # can't kill it - but that also means it SURVIVES us. Kill the host process group
+                    # and reap without blocking. NB this stops only the HOST side: once usbboot has
+                    # started the writer, the writer keeps running ON THE DISC regardless.
                     try:
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                     except OSError:
@@ -214,13 +270,13 @@ def flash(image_path, log_path=None, rep=None):
                     raise FlashError(
                         f"flash timed out - the device stopped responding after "
                         f"{FLASH_HARD_TIMEOUT_SECS // 60} min (it most likely reset "
-                        "mid-flash)", code="E303", action=RECOVERABLE)
+                        "mid-flash). Result UNKNOWN.", code="E303", action=WAIT_THEN_RECOVER)
                 except BaseException:
-                    # Ctrl-C, SIGTERM, a GUI/parent crash, or any error during the wait: WITHOUT
-                    # this the flasher keeps writing NAND after we return, and a tester who believes
-                    # flashing stopped may unplug mid-write and brick the device. Kill it, then
-                    # propagate the original interruption/error.
-                    _kill_flasher()
+                    # Ctrl-C, SIGTERM, a GUI/parent crash, or any error during the wait. Stop the host
+                    # side, and say plainly that the Disc may STILL be writing: the writer runs on the
+                    # device by itself once started, so unplugging now could leave it half-written.
+                    rep.warning("The flash was interrupted on this computer. " + WAIT_THEN_RECOVER)   # first:
+                    _kill_flasher()                      # a second Ctrl-C during the reap must not lose the warning
                     raise
         finally:
             rep.indeterminate(False)
@@ -233,8 +289,19 @@ def flash(image_path, log_path=None, rep=None):
                 code="E301", action=RECOVERABLE)
 
         d = _parse_debug(dbg)
-        ok = (d["magic"] == 0x4004E005 and d["done"] == 0x55555555
-              and d["result"] == 0x600DF10C)
+        with open(dbg, "rb") as f:
+            verdict = basegate.read_verdict(f.read(1024))
+        d["gate"] = verdict
+        if d["magic"] == 0x4006E006 and d["done"] == 0x55555555 and verdict["result"] != 1:
+            # the gate refused: the writer returned before unlocking/erasing anything
+            rep.log(f"base gate: 0x{verdict['result']:08X} ({verdict['meaning']}); Disc base seen: "
+                    f"{verdict['matched_base'] or 'unknown'}")
+            if verdict["erase_started"]:
+                raise FlashError("the writer reported a refusal AFTER starting to erase - flash result UNKNOWN",
+                                 code="E321", action=RECOVERABLE)
+            raise BaseRefused(basegate.refusal_message(verdict, target_ver), verdict)
+        ok = (d["magic"] == 0x4006E006 and d["done"] == 0x55555555
+              and d["result"] == 0x600DF10C and verdict["result"] == 1)
         # SAFETY: the writer only programs its compiled NLOGBLOCKS (dbg[6]) logical blocks. If that is
         # fewer than the image occupies, the TAIL is silently dropped - and squashfs keeps its
         # inode/directory/fragment tables at the tail, so a truncated image mounts-fails and won't
@@ -259,10 +326,12 @@ def flash(image_path, log_path=None, rep=None):
         rep.log(f"result: 0x{d['result']:08X} [{fcode}] {name}")
 
         if not ok:
-            raise FlashError(
+            e = FlashError(
                 f"flash FAILED (device result [{fcode}] {name}, "
                 f"magic=0x{d['magic']:08X} done=0x{d['done']:08X})",
                 code="E310", action=RECOVERABLE)
+            e.verdict = verdict                                  # the gate had passed: the base IS target_ver's
+            raise e
         if not cap_ok:
             raise FlashError(
                 f"writer/image size MISMATCH: the flashing tool programs {d['nlogblocks']} x 128 KB "
@@ -315,7 +384,7 @@ class _sleep_inhibited:
         if self.proc is None and self.rep is not None:
             self.rep.warning(
                 "could not auto-inhibit system sleep on this host - make sure your "
-                "computer will NOT sleep/suspend for the next ~15 minutes (a suspend "
+                "computer will NOT sleep/suspend for the next ~25 minutes (a suspend "
                 "mid-flash aborts it; the device stays recoverable).")
         return self
 
