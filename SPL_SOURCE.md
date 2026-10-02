@@ -1,8 +1,10 @@
 # Stage-1 SPL - corresponding source & build (GPL-2.0)
 
 The installer's USB stage-1 loader (`flash/disc_spl_lpddr3.bin`) that brings up DRAM before
-the on-device NAND writer runs is **built entirely from GPL source** - no vendor/USBCloner
-binary is redistributed. This file is the GPL-2.0 "corresponding source" pointer + build recipe.
+the on-device NAND writer runs is **built from GPL source** - no vendor/USBCloner binary is
+redistributed - **plus a small DDR parameter block (about 332 bytes of memory-chip register
+settings) captured from the device's factory configuration**; see "DDR parameter block" below
+for its provenance, which is an open item. This file is the GPL-2.0 "corresponding source" pointer + build recipe.
 
 ## Source
 
