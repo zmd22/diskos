@@ -3,8 +3,8 @@
 The installer ships prebuilt native tools under `vendor/<os>-<arch>/`. Some of them are, or
 statically link, **GPL-2.0** / **LGPL-2.1** code. To satisfy those licenses this directory carries the
 **complete corresponding source** for the exact upstream versions those binaries were built from - so
-the source travels **from the same place** as the binaries (GPL-2.0 §3(a) + the "same place" clause
-in §3's final paragraph; LGPL-2.1 §6(a)/(d)).
+the source travels **from the same place** as the binaries (GPL-2.0 section 3(a) + the "same place" clause
+in section 3's final paragraph; LGPL-2.1 section 6(a)/(d)).
 
 Each item below is a full Debian source package (`.orig` upstream tarball + `.debian` packaging +
 `.dsc`); extract with `dpkg-source -x <name>.dsc` (or unpack the `.orig` tarball directly).
@@ -31,7 +31,12 @@ The build scripts that produced the shipped binaries are in `../build/`:
 
 Those scripts fetch the same upstream source via `apt-get source`; the tarballs here pin the exact
 versions used so you can rebuild - or substitute your own modified libusb and relink `usbboot`
-(the LGPL-2.1 §6 relink path) - without depending on a distribution's source availability.
+(the LGPL-2.1 section 6 relink path) - without depending on a distribution's source availability.
+
+The macOS arm64 tools use separate Homebrew inputs: squashfs-tools 4.7.5,
+libusb 1.0.30, lzo 2.10, lz4 1.10.0, xz 5.8.4 and zstd 1.5.7.
+Their archives, squashfs patch, formula snapshots and relink instructions
+are in [`macos-arm64/README.md`](macos-arm64/README.md).
 
 ## The LGPL-2.1 relink path for libusb (usbboot)
 
