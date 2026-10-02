@@ -15,8 +15,8 @@ via sysfs names, `dmesg`). Nothing was written to the device during this survey.
 | Item | Value | Source |
 |---|---|---|
 | SoC | Ingenic **X2000** (xburst2), board `ingenic,x2000_halley5_module_base` | `/proc/cpuinfo` |
-| Cores | **2× XBurst II V2**, SMP | `/proc/cpuinfo` (processor 0,1) |
-| Clock | ~1.2 GHz (BogoMIPS ≈ 2390) | `/proc/cpuinfo` |
+| Cores | **2x XBurst II V2**, SMP | `/proc/cpuinfo` (processor 0,1) |
+| Clock | ~1.2 GHz (BogoMIPS ~ 2390) | `/proc/cpuinfo` |
 | FPU | Yes (per-core) | `/proc/cpuinfo` |
 | SIMD | **MSA** (MIPS SIMD Architecture, 128-bit) - `ASEs implemented: msa` | `/proc/cpuinfo` |
 | ISA | mips1 / mips2 / mips32r2 + MSA | `/proc/cpuinfo` |
@@ -73,17 +73,17 @@ only the UI/state are on `/usr/data`.
 ## 4. Audio - the headline subsystem
 
 ### 4.1 DACs - quad CS43131, fully balanced
-Four Cirrus **CS43131** chips on I²C bus 3:
+Four Cirrus **CS43131** chips on I2C bus 3:
 
-| I²C addr | sysfs name | /dev node (major) |
+| I2C addr | sysfs name | /dev node (major) |
 |---|---|---|
 | 3-0030 | cs43131  | `/dev/cs43131`  (248) |
 | 3-0031 | cs43131b | `/dev/cs43131b` (247) |
 | 3-0032 | cs43131c | `/dev/cs43131c` (246) |
 | 3-0033 | cs43131d | `/dev/cs43131d` (245) |
 
-dmesg tags include `cs43131_left_negetive` and `cs43131b_open` → the four DACs are wired
-as **L+/L−/R+/R− (fully differential / balanced)**, two CS43131 per channel. This is an
+dmesg tags include `cs43131_left_negetive` and `cs43131b_open` -> the four DACs are wired
+as **L+/L-/R+/R- (fully differential / balanced)**, two CS43131 per channel. This is an
 unusually serious analog design for the form factor. *(Whether the physical jack exposes
 balanced (4.4 mm) or sums to single-ended (3.5 mm) is a board question - confirm against
 the unit's connectors.)*
@@ -93,7 +93,7 @@ Each CS43131 is a stereo DAC + integrated headphone amp; the family supports PCM
 exposing the four char devices above; stock `mq_player` drives them with **ioctl** (not
 ALSA controls). Raw `/dev/i2c-3` is also present as a fallback.
 
-### 4.2 SoC I²S/DMA path - the streaming ceiling
+### 4.2 SoC I2S/DMA path - the streaming ceiling
 The Ingenic audio controller (ALSA card 0 `x2000`) exposes **5 playback + 5 capture DMA
 channels** (`hw:0,0`-`hw:0,4` playback). `aplay --dump-hw-params` on an idle channel:
 
@@ -104,7 +104,7 @@ CHANNELS:    [1 8]
 RATE:        [8000 768000]
 ```
 
-So the **kernel/I²S link can stream up to 768 kHz / 64-bit / 8-channel** - far beyond the
+So the **kernel/I2S link can stream up to 768 kHz / 64-bit / 8-channel** - far beyond the
 current track (S32_LE / 48 kHz / 2ch on DMA3). The real output ceiling is set by the
 CS43131 (~384 kHz PCM, DSD256), not the SoC.
 
@@ -113,7 +113,7 @@ CS43131 (~384 kHz PCM, DSD256), not the SoC.
 `MICBIAS`), digital mic (`DMIC ...`), line-out muxes (`LO0_MUX`...`LO11_MUX`), and the five
 audio-interface formatters (`baic0_fmt`...`baic4_fmt`). There is **no CS43131 control, no
 DSD switch, and no digital-filter control in ALSA** - all of that is the kernel driver +
-mq_player ioctl path. `BAIC: baic start/stop` in dmesg marks I²S on/off per track.
+mq_player ioctl path. `BAIC: baic start/stop` in dmesg marks I2S on/off per track.
 
 ### 4.4 Decode & format support (from mq_player RE)
 - Decoder backend: **libavcodec.so.58 (ffmpeg)** - string `decoder_ffmpeg`.
@@ -134,16 +134,16 @@ today (the DAC just has to already be configured for the rate).
 | Item | Value |
 |---|---|
 | Driver | `ingenicfb` |
-| Visible | 360×360, 32 bpp (XRGB8888/BGRA, panel mounted 180°-rotated) |
-| Framebuffer virtual | 360×**1080** = triple-buffered 360×360 |
+| Visible | 360x360, 32 bpp (XRGB8888/BGRA, panel mounted 180 degrees-rotated) |
+| Framebuffer virtual | 360x**1080** = triple-buffered 360x360 |
 | **Overlay layers** | `fb0`-`fb3` = **4 hardware LCDC planes** (`/dev/fb0..fb3`) |
 | Backlight | standard `backlight` class, **41 levels (0-40)** |
 
 **Layer control interface (confirmed via sysfs):** `ingenicfb` exposes `layer0`-`layer3`
 under `/sys/class/graphics/fb0/device/`, each with `enable`, `src_fmt`, `src_size`,
-`target_pos`, and **`target_size`**. `target_size` ≠ `src_size` ⇒ the LCDC has a
+`target_pos`, and **`target_size`**. `target_size` != `src_size` => the LCDC has a
 **per-layer hardware scaler** (notable, since there's otherwise no GPU/VPU). layer0 is the
-active UI plane (`enable: 1`, src 360×360). Layers position + scale in hardware but **do
+active UI plane (`enable: 1`, src 360x360). Layers position + scale in hardware but **do
 not rotate**.
 
 **Implication:** static scaled art/backdrops *could* be HW-composited on fb1-3 (e.g. a
@@ -172,10 +172,10 @@ We can synthesize input by writing the 32-bit-ABI `input_event` (16-byte) MT-B s
 
 ## 7. Power
 
-| IC | I²C | role |
+| IC | I2C | role |
 |---|---|---|
 | **SGM41513** | 2-001a | battery charger (Li-ion, ~3A class) |
-| **CW221X** (Cellwise) | 2-0064 | battery **fuel gauge** → `/sys/class/power_supply/cw221X-bat` |
+| **CW221X** (Cellwise) | 2-0064 | battery **fuel gauge** -> `/sys/class/power_supply/cw221X-bat` |
 | **AW35615** | 2-0022 | **USB-C PD / CC** controller (Type-C orientation + power delivery) |
 
 Live read: capacity 100%, 4.32 V, source "Mains". The fuel gauge gives real %/voltage;
@@ -198,7 +198,7 @@ so faster charging / power-role awareness is at least theoretically addressable.
 > **Corrects prior note:** earlier memory said "BCM4345C5". The actual silicon is
 > **BCM43438 (AP6212)** - single-band 2.4 GHz + BT 4.x.
 
-**Implication:** no 5 GHz → WiFi music transfer / streaming is capped at 2.4 GHz real
+**Implication:** no 5 GHz -> WiFi music transfer / streaming is capped at 2.4 GHz real
 throughput (tens of Mbps, congestion-sensitive). BT codec quality (LDAC/aptX) is a
 userspace-stack question, not a chip blocker for A2DP.
 
@@ -209,7 +209,7 @@ userspace-stack question, not a chip blocker for A2DP.
 | Item | Value |
 |---|---|
 | Controller | **DWC2 OTG** (`13500000.otg_new`) - **dual-role** (host *or* device) |
-| Current mode | device; gadget `serial_demo` exposing **ACM** only (VID 0x0525 / PID 0xa4a7) → this *is* our serial shell |
+| Current mode | device; gadget `serial_demo` exposing **ACM** only (VID 0x0525 / PID 0xa4a7) -> this *is* our serial shell |
 | USB-DAC mode | stock "UAC" work-mode reconfigures the gadget to **USB Audio Class** (device-as-DAC for a host PC) |
 
 **Untapped:** DWC2 is OTG, so **USB host mode is physically possible** - mounting USB
@@ -228,8 +228,8 @@ config and likely a USB-C OTG adapter.
 - **LED:** **none.** `/sys/class/leds` is empty and there is **no physical LED** on the
   unit (confirmed visually). The `RGB_LEVEL`/`RGB_STATUS` fields in mq_player's config blob
   are vestigial, inherited from the halley5 reference design / other FiiO products.
-  → diskOS should plan **no LED features**.
-- **Motion sensors:** none on I²C (no accel/gyro) - no tilt/gesture input despite the
+  -> diskOS should plan **no LED features**.
+- **Motion sensors:** none on I2C (no accel/gyro) - no tilt/gesture input despite the
   round watch-like shape.
 
 ---
@@ -238,9 +238,9 @@ config and likely a USB-C OTG adapter.
 
 | Capability | HW supports | Stock uses | diskOS opportunity |
 |---|---|---|---|
-| MSA SIMD | Yes (128-bit) | UI not built for it (unknown) | Rebuild LVGL/DSP `-mmsa` → faster render/effects |
+| MSA SIMD | Yes (128-bit) | UI not built for it (unknown) | Rebuild LVGL/DSP `-mmsa` -> faster render/effects |
 | LCDC overlay planes | 4 (fb0-3) | fb0 only | HW-composited art/video layer (spinning cover, backdrops) |
-| I²S rate | 768k/64b/8ch | ≤384k/DSD256 (DAC-limited) | none beyond DAC; already maxes the DAC |
+| I2S rate | 768k/64b/8ch | <=384k/DSD256 (DAC-limited) | none beyond DAC; already maxes the DAC |
 | DSD native + DoP | Yes | Yes | parity - reuse driver ioctls |
 | Quad balanced DACs | Yes | Yes | direct ioctl control for bit-perfect / HW volume |
 | USB host (OTG) | Yes | No (device-only) | USB storage / external USB-DAC transport |
@@ -289,7 +289,7 @@ expensive; the audiophile local-playback path is the tractable, high-value slice
 ## Appendix: probe commands (reproducible)
 - SoC/mem: `cat /proc/cpuinfo /proc/meminfo`, `uname -a`
 - Audio: `cat /proc/asound/{cards,pcm}`, `aplay -l`, `aplay -D hw:0,0 --dump-hw-params /dev/zero`, `amixer -c0 controls`
-- I²C map: `for d in /sys/bus/i2c/devices/*/name; do echo "$d: $(cat $d)"; done`
+- I2C map: `for d in /sys/bus/i2c/devices/*/name; do echo "$d: $(cat $d)"; done`
 - Power: `cat /sys/class/power_supply/*/{type,capacity,voltage_now,status}`
 - Storage: `cat /proc/partitions /proc/mtd`
 - USB: `ls /sys/class/udc`, `cat /sys/class/udc/*/state`, `ls /sys/kernel/config/usb_gadget/*`
