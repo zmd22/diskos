@@ -20,7 +20,7 @@ See [`ui/README.md`](../ui/README.md) for the toolchain details and a from-scrat
 ## 2. Get a shell on the device
 
 Enable **Debug Mode** on the device (Settings -> System). It shows the device IP and a one-time SSH
-password. The password is regenerated on every enable and does **not** survive a reboot.
+password. The password is regenerated on every enable and SSH access does **not** survive a reboot.
 
 ```sh
 ssh root@<device-ip>      # password from Debug Mode
@@ -88,28 +88,25 @@ Hand-deployed binaries revert to the flashed build on reboot (S97 verifies `/usr
 the read-only manifest). To bake a build in permanently, flash it with the installer:
 
 ```sh
-python3 -m diskos_installer install --stock <stock_rootfs.squashfs> --ui path/to/mq_ui --variant public
+./diskos-installer install --firmware SNOWSKY_DISC_update_*.zip --ui path/to/mq_ui --variant public
 ```
 
 `--ui` overrides the bundled UI binary, so you can flash your own build. This is a mask-ROM write and
-takes about 15 minutes. The installer prompts for confirmation before it writes; add `-y` only when you
+takes about 20 minutes. The installer prompts for confirmation before it writes; add `-y` only when you
 deliberately want to skip that prompt (for example in a script), since it rewrites the root filesystem.
 
 ### macOS note
 
 The installer looks for host-native tools under `vendor/<host-tag>/` (for example
-`vendor/macos-arm64/`), not on your `PATH`. The repo ships only the prebuilt Linux x86-64 tools, so on
-a Mac you build the native tools once:
+`vendor/macos-arm64/`), not on your `PATH`. An Apple Silicon release package includes prebuilt flash tools; for a source checkout or an Intel Mac, build the native tools once:
 
 ```sh
-cd installer
 ./vendor/setup-macos.sh
 ```
 
 It builds `usbboot`, `mksquashfs`, and `unsquashfs` (with load paths rewritten) into
 `vendor/macos-arm64/` from `src/usbboot` plus Homebrew deps (`libusb squashfs lzo dylibbundler`) and the
-Xcode command line tools. After that the installer finds them and the `[E102]` error goes away. The end
-user of a released build needs none of this.
+Xcode command line tools. After that the installer finds them and the `[E102]` error goes away. Apple Silicon release users need Python 3 and the setup dependencies, but do not need to build these flash tools.
 
 ## Notes
 
@@ -118,3 +115,17 @@ user of a released build needs none of this.
 - **Player logs:** `/usr/data/fiio/log/fiio_player.log`. **PCM state:**
   `/proc/asound/card*/pcm*p/sub*/status` (`RUNNING` = playing).
 - **Raw player frames** (for debugging IPC): `/usr/data/psend <FRAME>` sends a raw `/player` command.
+
+## Preview a UI build without reflashing
+
+A live preview is temporary. Build `mq_ui` as above, keep the Disc and computer on the same Wi-Fi network, and enable Debug Mode under Settings > System. The screen shows the Disc IP and a fresh SSH password. You may enter it interactively; `sshpass` is optional.
+
+From the folder holding `mq_ui`, stream it to a staging path and compare the two MD5 hashes before replacing the running UI:
+
+```sh
+ssh root@<device-ip> 'cat > /usr/data/mq_ui.new && chmod 755 /usr/data/mq_ui.new && md5sum /usr/data/mq_ui.new' < mq_ui
+md5sum mq_ui
+ssh root@<device-ip> 'mv /usr/data/mq_ui.new /usr/data/mq_ui'
+```
+
+Run the detached reload command in section 4, then check `/proc/<pid>/exe` as shown there. The startup animation runs again. Restarting the Disc restores the flashed build because the boot script checks the UI against its read-only manifest. To keep a build across restarts, flash it with the installer as in section 5.
