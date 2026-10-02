@@ -2,7 +2,7 @@
 
 Layout (in the source tree AND inside the PyInstaller bundle):
     <root>/vendor/<os>-<arch>/   usbboot, mksquashfs, unsquashfs,
-                                 my_write5_dram.bin, disc_spl_lpddr3.bin,
+                                 my_write6_dram.bin, disc_spl_lpddr3.bin,
                                  lib/ (bundled .so/.dylib for usbboot)
     <root>/payload/              mq_ui, S97diskos_install, S99usbserial,
                                  diskos_manifest templates, etc.
@@ -64,7 +64,7 @@ def native_build_script(kind="squashfs"):
     """Host-appropriate script that (re)builds the native tools, for error guidance."""
     o, _ = platform_probe.host()
     if o == "macos":
-        return "build/build-macos.sh"
+        return "vendor/setup-macos.sh"
     return "build/build-usbboot-static.sh" if kind == "usbboot" else "build/build-squashfs-static.sh"
 
 
@@ -125,9 +125,11 @@ def native(name, required=True):
     if name in _SYSTEM_FALLBACK:
         raise PreflightError(
             f"tool '{name}' not found in vendor/{tag} or PATH", code="E102",
-            action="install squashfs-tools with LZO support (Debian/Ubuntu: "
-                   "sudo apt install squashfs-tools), or build the bundled tools with "
-                   f"{native_build_script('squashfs')} from the diskOS source")
+            action="install squashfs-tools with LZO support (Arch/CachyOS: "
+                   "sudo pacman -S squashfs-tools, Debian/Ubuntu: "
+                   "sudo apt install squashfs-tools, Fedora: sudo dnf install squashfs-tools, "
+                   "macOS: brew install squashfs), "
+                   f"or build the bundled tools with {native_build_script('squashfs')} from the diskOS source")
     if name == "usbboot":
         raise PreflightError(
             f"bundled tool 'usbboot' not found for {tag}", code="E102",
@@ -136,7 +138,7 @@ def native(name, required=True):
     raise PreflightError(
         f"bundled device file '{name}' not found for {tag}", code="E102",
         action="restore this file from the matching diskOS source or release; "
-               "see build/README-vendor.md")
+               "see build/NATIVE_TOOLS.md")
 
 
 def data(name, required=True):
