@@ -33,7 +33,7 @@ MAC addresses, and network credentials.
 
 ## Debug Mode (on-device remote access)
 
-diskOS has an opt-in **Debug Mode** (Settings → System → Debug Mode), **off by default**, that starts
+diskOS has an opt-in **Debug Mode** (Settings > System > Debug Mode), **off by default**, that starts
 an SSH server over WiFi. It uses a **random password generated per enable**, placed into a private
 shadow file bind-mounted over `/etc/shadow`; the device's stock password is never used or exposed.
 While it is on, it grants **root access over the network**.
