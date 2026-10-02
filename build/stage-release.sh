@@ -7,7 +7,8 @@
 #
 # Usage:
 #   build/stage-release.sh [TAG ...]      # default TAG: the host's (e.g. linux-x86_64)
-# Build the native tools for each TAG first (Linux: build/build-*-static.sh; macOS: build-macos.sh).
+# Needs a git checkout with the release committed (git archive of DISKOS_REF, default HEAD).
+# Build the native tools for each TAG first (Linux: build/build-*-static.sh; macOS: vendor/setup-macos.sh).
 set -euo pipefail
 cd "$(dirname "$0")/.."                        # installer/
 ROOT=$(pwd)
@@ -21,52 +22,148 @@ if [ "$#" -eq 0 ]; then
   set -- "${_os}-${_arch}"
 fi
 
-# files/dirs that must NEVER go in a public tarball (secrets, FiiO-derived images, build scratch,
-# internal docs). Mirrors .gitignore; kept here so staging works even outside a git checkout.
-EXCLUer=(
-  --exclude='./.git' --exclude='./.venv' --exclude='./build/venv' --exclude='./build/work'
-  --exclude='./build/dist' --exclude='./build/release' --exclude='*/__pycache__/*'
-  --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' --exclude='*.bak'
-  --exclude='./signing' --exclude='*.pem' --exclude='*.key'
-  --exclude='./diskos_dev*.bin' --exclude='./diskos_public*.bin' --exclude='*_recovery.bin'
-  --exclude='*.squashfs' --exclude='*.sqfs' --exclude='./_retired_unlicensed'
-  --exclude='./flash/qual_lpddr3.sh' --exclude='./flash/scan_check.sh'
-  --exclude='./flash/my_write5_scan_dram.bin' --exclude='./flash/usbboot'
-  --exclude='./mq_ui' --exclude='./S97diskos_install' --exclude='./S99usbserial'
-  --exclude='./INSTALL.md' --exclude='./mkdiskos.sh' --exclude='./flash/flash_diskos.sh'
-  --exclude='./flash/extract_stock_rootfs.sh'
-  --exclude='./PUBLICATION_PLAN.md' --exclude='./BETA_CHECKLIST.md' --exclude='./RELEASE.md'
-  --exclude='./RELEASE_READINESS.md' --exclude='./UPDATE2_DRAFT.md' --exclude='./UPDATE_ARCHITECTURE.md'
-  --exclude='./INSTALL_v209_legacy.md' --exclude='./SHA256SUMS' --exclude='*.log' --exclude='*.tmp'
-  --exclude='.DS_Store'
-)
+# The tarball is built from `git archive` of REF (default HEAD), never from the working tree, so untracked
+# local files (scratch tools, unused assets, signing keys) cannot leak in. Commit what belongs in the release
+# first; set DISKOS_REF=<tag|commit> to stage something other than HEAD.
+REF=${DISKOS_REF:-HEAD}
+git -C "$ROOT" rev-parse --verify --quiet "$REF^{commit}" >/dev/null || { echo "bad ref: $REF" >&2; exit 1; }
+[ "$(git -C "$ROOT" rev-parse --show-toplevel)" = "$ROOT" ] || { echo "installer/ must be the git root" >&2; exit 1; }
 
-# native tools + payload that MUST be present for a TAG (fail rather than ship an unusable tarball)
-REQ_VENDOR=(usbboot mksquashfs unsquashfs my_write5_dram.bin disc_spl_lpddr3.bin)
-REQ_PAYLOAD=(mq_ui S97diskos_install S99usbserial diskos-debug.sh dropbearmulti)
+# Paths that must NEVER appear in a tarball, even if someone commits them by mistake (checked after extract).
+FORBIDDEN=(signing '*.key' '*.squashfs' '*.sqfs' 'diskos_dev*.bin' 'diskos_public*.bin' '*_recovery.bin'
+  payload/diskos-prefstat ui/tools/diskos_prefstat.c _retired_unlicensed flash/qual_lpddr3.sh flash/scan_check.sh
+  flash/my_write5_scan_dram.bin)
+# Unused local screenshots: only these docs/assets images may ever ship if untracked ones appear.
+BLOCK_ASSETS=(audiobook-np.png books.png chapters.png quicksettings.png)
+
+# Host-side tools taken from vendor/<TAG>/ (untracked/ignored build outputs): an EXPLICIT allowlist only.
+REQ_VENDOR=(usbboot mksquashfs unsquashfs my_write6_dram.bin disc_spl_lpddr3.bin)
+# Payload that MUST exist in the archive (committed at REF); nothing else from the working tree is added.
+REQ_PAYLOAD=(mq_ui S96diskos_select S97diskos_install S99usbserial diskos-debug.sh dropbearmulti diskos-rmguard diskos-selected diskos-bootprobe diskos-artdec diskos-launch diskos-verify.sh diskos-root.pub.pem)
+MACOS_DYLIBS=(libusb-1.0.0.dylib liblzo2.2.dylib liblz4.1.10.0.dylib liblzma.5.dylib libzstd.1.5.7.dylib)
+# Other files that MUST be in the archive (writer + its build inputs, launcher source, verifier support).
+REQ_ARCHIVE=(flash/my_write6_dram.bin flash/my_write6.c flash/build_nand.sh flash/dram_head.bin flash/dram_head.S flash/dram_head.ld flash/dram.ld
+  flash/sha256_min.h flash/disc_spl_lpddr3.bin src/launcher/diskos_launch.c build/build-launcher.sh
+  diskos_installer/basegate.py ui/tools/diskos_artdec.c ui/tools/stb_image.h vendor/setup-macos.sh)
 
 made=()
 for TAG in "$@"; do
-  echo "== staging $TAG =="
+  echo "== staging $TAG (from $REF) =="
   miss=()
-  for f in "${REQ_VENDOR[@]}";  do [ -f "vendor/$TAG/$f" ] || miss+=("vendor/$TAG/$f"); done
-  for f in "${REQ_PAYLOAD[@]}"; do [ -f "payload/$f" ]      || miss+=("payload/$f");      done
+  for f in "${REQ_VENDOR[@]}"; do [ -f "vendor/$TAG/$f" ] || miss+=("vendor/$TAG/$f"); done
   if [ "${#miss[@]}" -gt 0 ]; then
-    echo "  SKIP $TAG - missing: ${miss[*]}" >&2
-    echo "  (build the native tools for $TAG first)" >&2
-    continue
+    echo "  FAIL $TAG - missing: ${miss[*]}" >&2
+    echo "  (build the native tools for $TAG first; every requested platform must stage, or nothing is published)" >&2
+    exit 1
   fi
 
-  # Stage into a temp dir named diskos-installer/, keeping ONLY this TAG's vendor dir, then tar it.
+  if [[ "$TAG" == linux-* ]]; then
+    if [ -e "vendor/$TAG/lib" ] || [ -L "vendor/$TAG/lib" ]; then
+      echo "  FAIL $TAG - static Linux tools must not have vendor/$TAG/lib" >&2
+      exit 1
+    fi
+    command -v file >/dev/null 2>&1 || { echo "  FAIL $TAG - file is required to check native tools" >&2; exit 1; }
+    for f in usbboot mksquashfs unsquashfs; do
+      path="vendor/$TAG/$f"
+      kind=$(file -b "$path")
+      if [ -L "$path" ] || [[ "$kind" != *"statically linked"* ]]; then
+        echo "  FAIL $TAG - $path is not a regular statically linked binary: $kind" >&2
+        exit 1
+      fi
+    done
+  fi
+  if [[ "$TAG" == macos-* ]]; then
+    if [ ! -d "vendor/$TAG/lib" ] || [ -L "vendor/$TAG/lib" ]; then
+      echo "  FAIL $TAG - vendor/$TAG/lib must be a directory" >&2
+      exit 1
+    fi
+  fi
+
   stage=$(mktemp -d)
   dest="$stage/diskos-installer"
   mkdir -p "$dest"
-  tar -c "${EXCLUer[@]}" --exclude='./vendor/*' -C "$ROOT" . | tar -x -C "$dest"
+  git -C "$ROOT" archive --format=tar "$REF" | tar -x -C "$dest"
+
+  # required files must be committed at REF (an untracked file is NOT in the archive)
+  miss=()
+  for f in "${REQ_ARCHIVE[@]}"; do [ -f "$dest/$f" ] || miss+=("$f"); done
+  for f in "${REQ_PAYLOAD[@]}";  do [ -f "$dest/payload/$f" ] || miss+=("payload/$f"); done
+  if [ "${#miss[@]}" -gt 0 ]; then
+    echo "  FAIL - required files missing from git archive of $REF (commit them first): ${miss[*]}" >&2
+    rm -rf "$stage"; exit 1
+  fi
+  key="$dest/payload/diskos-root.pub.pem"
+  if [ -L "$key" ] || grep -q 'PRIVATE KEY' "$key" ||
+     [ "$(head -n 1 "$key")" != '-----BEGIN PUBLIC KEY-----' ] ||
+     [ "$(tail -n 1 "$key")" != '-----END PUBLIC KEY-----' ] ||
+     ! openssl pkey -pubin -in "$key" -text -noout 2>/dev/null | grep -Eq 'ASN1 OID: prime256v1|NIST CURVE: P-256'; then
+    echo "  FAIL - archived payload/diskos-root.pub.pem must be a P-256 PUBLIC KEY PEM" >&2
+    rm -rf "$stage"; exit 1
+  fi
+  # the committed payload must be the same bytes as the working-tree build the tests ran against
+  for f in "${REQ_PAYLOAD[@]}"; do
+    if [ -f "payload/$f" ] && ! cmp -s "payload/$f" "$dest/payload/$f"; then
+      echo "  FAIL - payload/$f differs between working tree and $REF (commit or revert it)" >&2
+      rm -rf "$stage"; exit 1
+    fi
+  done
+
+  # only this TAG's allowlisted vendor tools; drop any other vendor content from the archive
+  find "$dest/vendor" -mindepth 1 -maxdepth 1 ! -name setup-macos.sh -exec rm -rf {} +
   mkdir -p "$dest/vendor/$TAG"
-  cp -a "vendor/$TAG/." "$dest/vendor/$TAG/"
-  rm -f "$dest/vendor/$TAG/"*.bak 2>/dev/null || true
-  # macOS build helper that build/build-macos.sh calls - ship it so that path isn't broken
-  [ -f vendor/setup-macos.sh ] && cp -a vendor/setup-macos.sh "$dest/vendor/setup-macos.sh"
+  for f in "${REQ_VENDOR[@]}"; do cp -a "vendor/$TAG/$f" "$dest/vendor/$TAG/$f"; done
+  if [[ "$TAG" == macos-* ]]; then
+    mkdir -p "$dest/vendor/$TAG/lib"
+    while IFS= read -r -d '' f; do
+      name=${f##*/}
+      allowed=0
+      for expected in "${MACOS_DYLIBS[@]}"; do [ "$name" = "$expected" ] && allowed=1; done
+      if [ "$allowed" -ne 1 ] || [ ! -f "$f" ] || [ -L "$f" ]; then
+        echo "  FAIL $TAG - unexpected or non-regular library: $f" >&2
+        rm -rf "$stage"; exit 1
+      fi
+    done < <(find "vendor/$TAG/lib" -mindepth 1 -maxdepth 1 -print0)
+    for name in "${MACOS_DYLIBS[@]}"; do
+      f="vendor/$TAG/lib/$name"
+      if [ ! -f "$f" ] || [ -L "$f" ]; then
+        echo "  FAIL $TAG - missing regular library: $f" >&2
+        rm -rf "$stage"; exit 1
+      fi
+      cp "$f" "$dest/vendor/$TAG/lib/$name"
+    done
+    # Check staged Mach-O load commands, including rpaths. Linux hosts have no otool.
+    for f in "$dest/vendor/$TAG/usbboot" "$dest/vendor/$TAG/mksquashfs" \
+             "$dest/vendor/$TAG/unsquashfs" "$dest/vendor/$TAG/lib/"*.dylib; do
+      if ! file -b "$f" | grep -q 'Mach-O'; then
+        echo "  FAIL $TAG - staged native file is not Mach-O: $f" >&2
+        rm -rf "$stage"; exit 1
+      fi
+      if command -v otool >/dev/null 2>&1; then
+        refs=$(otool -l "$f") || { echo "  FAIL $TAG - otool failed: $f" >&2; rm -rf "$stage"; exit 1; }
+      else
+        refs=$(strings "$f") || { echo "  FAIL $TAG - strings failed: $f" >&2; rm -rf "$stage"; exit 1; }
+      fi
+      if grep -Eq '/opt/homebrew|/usr/local|Cellar' <<< "$refs"; then
+        echo "  FAIL $TAG - staged Mach-O references Homebrew or a local library path: $f" >&2
+        rm -rf "$stage"; exit 1
+      fi
+    done
+  fi
+
+  # forbidden-path check on the final tree
+  bad=()
+  for pat in "${FORBIDDEN[@]}"; do
+    while IFS= read -r m; do [ -n "$m" ] && bad+=("$m"); done < <(
+      case "$pat" in */*) [ -e "$dest/$pat" ] && echo "$pat";; *) find "$dest" -name "$pat" -print | sed "s|^$dest/||";; esac)
+  done
+  # any PEM other than the required PUBLIC OTA root key, and any file holding private-key material
+  while IFS= read -r m; do bad+=("${m#$dest/}"); done < <(find "$dest" -name '*.pem' ! -path "$dest/payload/diskos-root.pub.pem")
+  while IFS= read -r m; do bad+=("${m#$dest/}"); done < <(grep -rIlE -e '^-----BEGIN [A-Z ]*PRIVATE KEY-----'  "$dest" 2>/dev/null || true)
+  for a in "${BLOCK_ASSETS[@]}"; do [ -e "$dest/docs/assets/$a" ] && bad+=("docs/assets/$a"); done
+  if [ "${#bad[@]}" -gt 0 ]; then
+    echo "  FAIL - forbidden files in the staged tree: ${bad[*]}" >&2
+    rm -rf "$stage"; exit 1
+  fi
 
   out="$REL/diskos-installer-$TAG.tar.gz"
   tar -czf "$out" -C "$stage" diskos-installer
@@ -81,7 +178,7 @@ echo "== generating SHA256SUMS =="
 ( cd "$REL" && sha256sum "${made[@]}" > SHA256SUMS ) && cat "$REL/SHA256SUMS"
 
 NOTES="$REL/RELEASE_NOTES.md"
-[ -f "$NOTES" ] || cat > "$NOTES" <<'EOF'
+cat > "$NOTES" <<'EOF'
 # diskOS installer - release
 
 Installer for diskOS on the FiiO Snowsky Disc. Runs from source with your own Python (GUI + CLI). It
@@ -99,16 +196,19 @@ cd diskos-installer
 ./install.sh          # builds a local .venv, installs pyusb + pycryptodome
 ./diskos-installer doctor
 ```
-Needs Python 3.8+. The GUI additionally needs Tk (`apt install python3-tk`); device detection needs
-`libusb-1.0` (`apt install libusb-1.0-0`). `install.sh` checks for both and tells you what to install.
+Needs Python 3.8+. The GUI additionally needs Tk. Release bundles include the native flash and
+squashfs tools; the macOS bundle includes a private libusb. On Linux, device detection needs the
+system libusb-1.0 package. `install.sh` checks for missing components.
 
 ## Install / restore / remove
 See the bundled `README.md`. Requires putting the device in mask-ROM (power off, hold Vol-Down, plug
-USB). ~15 min; normally recoverable via mask-ROM, but not guaranteed.
+USB). ~20 min; normally recoverable via mask-ROM, but not guaranteed.
 
 ## Honest status
-Enthusiast flasher. Linux tested end-to-end on real hardware (V2.09 + V2.28). macOS build validation
-in progress. Not affiliated with FiiO.
+Enthusiast flasher. Linux flashing is tested on real hardware; see the release notes for the test
+status of each firmware version. macOS: image builds work, and device flashing has been verified by a
+user on Apple Silicon (Intel is expected to work but is not confirmed); see the README.
+Not affiliated with FiiO.
 EOF
 echo "  -> $NOTES"
 echo "Done. Attach $REL/* to the GitHub Release."
