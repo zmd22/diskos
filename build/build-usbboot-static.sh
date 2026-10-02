@@ -17,15 +17,38 @@ SRC="$ROOT/src/usbboot/usbboot.c"
 OUT="$ROOT/vendor/linux-x86_64/usbboot"
 [ -f "$SRC" ] || { echo "ERROR: $SRC missing" >&2; exit 2; }
 
+verify_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s  %s\n' "$1" "$2" | sha256sum -c -
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s  %s\n' "$1" "$2" | shasum -a 256 -c -
+  else
+    echo "ERROR: sha256sum or shasum is required to verify source" >&2
+    return 1
+  fi
+}
+
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
 
 echo "==> fetching libusb source"
-apt-get source libusb-1.0 >/dev/null 2>&1 || {
-  echo "ERROR: 'apt-get source libusb-1.0' failed - enable deb-src or fetch libusb 1.0.x manually." >&2
-  exit 3; }
-cd libusb-1.0-*/
+if ! command -v apt-get >/dev/null 2>&1 || ! apt-get source libusb-1.0 >/dev/null 2>&1; then
+  LIBUSB_VER="1.0.27"
+  LIBUSB_URL="https://github.com/libusb/libusb/releases/download/v${LIBUSB_VER}/libusb-${LIBUSB_VER}.tar.bz2"
+  LIBUSB_TAR="$WORK/libusb-${LIBUSB_VER}.tar.bz2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$LIBUSB_URL" -o "$LIBUSB_TAR"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$LIBUSB_TAR" "$LIBUSB_URL"
+  else
+    echo "ERROR: failed to fetch libusb source (apt-get source, curl, or wget required)" >&2
+    exit 3
+  fi
+  verify_sha256 ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575 "$LIBUSB_TAR" || exit 3
+  tar -xjf "$LIBUSB_TAR"
+fi
+cd libusb-1.0*/
 
 echo "==> configuring libusb (static, no udev)"
 ./configure --disable-udev --enable-static --disable-shared \
