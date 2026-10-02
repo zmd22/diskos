@@ -6,6 +6,7 @@
 # --- SECRETS - never publish (private ECC update-signing key lives here) ---
 signing/
 *.pem
+!payload/diskos-root.pub.pem
 *.key
 
 # --- FiiO-derived images (contain FiiO rootfs - never redistribute) ---
