@@ -9,7 +9,7 @@
 #   * Best native: build on each arch -> two binaries (diskos-installer-arm64 /
 #     -x86_64). Run this script on an Intel Mac and an Apple Silicon Mac.
 #   * Universal2: build both arches, lipo the vendor tools + use PyInstaller
-#     target_arch=universal2 (advanced; see build/README-vendor.md).
+#     target_arch=universal2 (advanced; see build/NATIVE_TOOLS.md).
 set -euo pipefail
 cd "$(dirname "$0")/.."                        # installer/
 
