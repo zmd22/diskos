@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 
-from diskos_installer import __version__, bundle, platform_probe, service, state
+from diskos_installer import __version__, bundle, imagebuild, platform_probe, service, state
 from diskos_installer.reporter import QueueReporter
 
 ACCENT = "#FF375F"      # diskOS accent
@@ -29,6 +29,26 @@ ERRC = "#ff453a"
 
 # operation states
 IDLE, RUNNING, CONFIRM, SUCCESS, FAILED = "idle", "running", "confirm", "success", "failed"
+
+
+OTA_LABEL = "Allow diskOS updates over Wi-Fi"
+OTA_HELP = ("diskOS only updates when you tap Update diskOS on the Disc, and only installs releases "
+            "signed by the diskOS release key. Untick to build without updates.")
+OTA_NO_KEY = "This installer has no release key; updates are off"
+
+
+def ota_key_available():
+    """True when this installer has a release key (env or payload), as resolve_ota_config finds it.
+    A key that exists but is unreadable/invalid counts as available: the build reports that error."""
+    try:
+        return imagebuild.resolve_ota_config() is not None
+    except imagebuild.BuildError:
+        return True
+
+
+def ota_params(ticked, key_available):
+    """GUI checkbox state -> the service.do_install param. No key means always off."""
+    return {"no_ota": not (ticked and key_available)}
 
 
 class App:
@@ -154,6 +174,7 @@ class App:
         ttk = self.ttk
         import tkinter as tk
         m = self.mode.get()
+        self.ota_cb = None
         inner = ttk.Frame(self.cfg, style="Panel.TFrame")
         inner.pack(fill="x", padx=12, pady=12)
         if m == "install":
@@ -173,6 +194,15 @@ class App:
             self.variant_warn_lbl = tk.Label(
                 inner, text="", bg=PANEL, fg=WARN, font=self.f_b, justify="left", wraplength=460)
             self.variant_warn_lbl.grid(row=4, column=0, sticky="w", pady=(4, 0))
+            self.ota_key = ota_key_available()
+            self.ota_var = tk.BooleanVar(value=self.ota_key)
+            self.ota_cb = ota_cb = ttk.Checkbutton(inner, text=OTA_LABEL, variable=self.ota_var)
+            ota_cb.grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+            if not self.ota_key:
+                ota_cb.state(["disabled"])
+            tk.Label(inner, text=(OTA_HELP if self.ota_key else OTA_NO_KEY), bg=PANEL, fg=SUBFG,
+                     font=self.f_b, justify="left", wraplength=460).grid(
+                row=6, column=0, columnspan=2, sticky="w", pady=(2, 0))
             inner.columnconfigure(0, weight=1)
         elif m == "restore":
             have = state.stock_image_exists()   # fast; full verify happens at restore time
@@ -244,6 +274,7 @@ class App:
                 self._log("Choose your FiiO firmware .zip first.")
                 return
             params = {"firmware": fw, "variant": self.variant.get()}
+            params.update(ota_params(self.ota_var.get(), self.ota_key))
             fn = service.do_install
         elif m == "restore":
             fw = getattr(self, "fw_var", None)
@@ -289,6 +320,9 @@ class App:
                 walk(c)
         walk(self.mode_frame)
         walk(self.cfg)
+        cb = getattr(self, "ota_cb", None)
+        if cb is not None and not self.ota_key:
+            cb.state(["disabled"])          # no release key: stays off and locked
         self.action_btn.config(state=st)
 
     def _clear_finish_extra(self):
@@ -320,7 +354,7 @@ class App:
         body.pack(fill="both", expand=True, padx=18, pady=16)
         ttk.Label(body, text=summary.get("action", "confirm").upper(),
                   style="H.TLabel").pack(anchor="w", pady=(0, 6))
-        for k in ("variant", "duration", "consequence"):
+        for k in ("variant", "ota", "duration", "consequence", "requires"):
             if summary.get(k):
                 ttk.Label(body, text=f"{k}: {summary[k]}", style="Sub.TLabel",
                           wraplength=W - 36, justify="left").pack(anchor="w", pady=1)
@@ -339,7 +373,7 @@ class App:
         row = ttk.Frame(body)
         row.pack(side="bottom", fill="x", pady=(14, 0))
         ttk.Button(row, text="Cancel", command=lambda: _resolve(False)).pack(side="right", padx=(8, 0))
-        begin = ttk.Button(row, text=("Begin flash (~15 min)" if destructive else "Proceed"),
+        begin = ttk.Button(row, text=("Begin flash (~20 min)" if destructive else "Proceed"),
                            style="Accent.TButton", command=lambda: _resolve(True))
         begin.pack(side="right")
 
