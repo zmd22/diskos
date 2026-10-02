@@ -15,17 +15,17 @@ and UI are capable of, so diskOS (our LVGL UI) can drive every feature.
 
 ---
 
-## ⚑ CORRECTIONS - full verification pass (2026-07)
+## NOTE: CORRECTIONS - full verification pass (2026-07)
 Handler-level RE of both binaries; corrections spot-checked against the binary and applied inline below.
 - **Binaries are glibc dynamic, not static musl** (interp `/lib/ld-linux-mipsn8.so.1`, 28 DT_NEEDED). Affects any replacement-binary / preload work.
 - **IPC frame = `TAG(4) + TOTAL_LEN(4hex) + VALUE1(4hex) + optional payload`** - LEN is *total*, not payload length; class-2 cmds add VALUE2. Builder `mq_ui 0x43f82c` (`%s%04X%04X%s`). Replies `%s%04X%04X%s` to `/ui`. Queue `/player` maxmsg=20 msgsize=8192.
-- **`06b3` = BT CODEC SELECT** (0=SBC 1=AAC 2/3/4=LDAC; worker 0x40eaf4 → `set_out_dev_sample_array(2,44100,44100)` for SBC/AAC, 96000 for LDAC). **`06b4` = LDAC quality only** (mob/std/high via /usr/data/bt_pipe_recv). ← the two were swapped in our old notes.
-- **✅ BT AUDIO OUTPUT NOW WORKS (2026-08-03, live-fixed).** The DAP CAN transmit to a BT speaker (a2dp-source) - it just wasn't exposed and the code is fragile. The crash we hit was NOT the 06b3 codec value and NOT unfinished code: it was **skipping the mandatory `0666000C0006` pre-stop** before `0666000C0002`. Full working route sequence + the `--sbc-quality=medium` (stereo, no stutter) fix → **COMMAND_MAP.md "BT AUDIO OUTPUT" section**. The earlier "SBC fix frame = 06b3000C0000" was wrong/incomplete: diskOS uses `06b3001D0000<MAC>` after the pre-stop + `06c1` init.
+- **`06b3` = BT CODEC SELECT** (0=SBC 1=AAC 2/3/4=LDAC; worker 0x40eaf4 -> `set_out_dev_sample_array(2,44100,44100)` for SBC/AAC, 96000 for LDAC). **`06b4` = LDAC quality only** (mob/std/high via /usr/data/bt_pipe_recv). <- the two were swapped in our old notes.
+- **[verified] BT AUDIO OUTPUT NOW WORKS (2026-08-03, live-fixed).** The DAP CAN transmit to a BT speaker (a2dp-source) - it just wasn't exposed and the code is fragile. The crash we hit was NOT the 06b3 codec value and NOT unfinished code: it was **skipping the mandatory `0666000C0006` pre-stop** before `0666000C0002`. Full working route sequence + the `--sbc-quality=medium` (stereo, no stutter) fix -> **COMMAND_MAP.md "BT AUDIO OUTPUT" section**. The earlier "SBC fix frame = 06b3000C0000" was wrong/incomplete: diskOS uses `06b3001D0000<MAC>` after the pre-stop + `06c1` init.
 - **`06b1`/`06b2`** = BT sample-rate / bit-depth params (not list/query).
 - **`0689`** = EQ preset *apply* (21-way engine 0x449544), not a DB-only/media-info op.
 - **`0201`** = generic transport toggle (not Roon-specific). **`0657`/`0666`/`06b3` "close_player" = false positive** (shared teardown preamble). `0666`=route (2=BTSRC 4=SPDIF 6=DAC).
-- **out_dev** enum has no BTSINK (that's an input/work-mode). 48k→44.1k resample is `libfiio_decoder` over FFmpeg `libswresample` - a stock path, so codec-feasible (CPU headroom still needs an on-device xrun benchmark).
-- **IPC-hardening RISK:** stock parser trusts declared LEN and uses `strlen` over the real `mq_receive` byte count → diskOS must emit strictly-correct total lengths and never forward untrusted frames.
+- **out_dev** enum has no BTSINK (that's an input/work-mode). 48k->44.1k resample is `libfiio_decoder` over FFmpeg `libswresample` - a stock path, so codec-feasible (CPU headroom still needs an on-device xrun benchmark).
+- **IPC-hardening RISK:** stock parser trusts declared LEN and uses `strlen` over the real `mq_receive` byte count -> diskOS must emit strictly-correct total lengths and never forward untrusted frames.
 - Still UNVERIFIED / deep-RE TODO (AirPlay/DLNA/Roon triggers now RESOLVED for V2.40 - the `0657` mode table, see COMMAND_MAP.md): `0715` runtime volume callback @0x822b14; full `SET_USB_MODE` wire encoding; `0722` OTA worker chain; CS43131 ioctl ABI; the remaining ~190 family-inferred tag meanings.
 
 ---
@@ -54,7 +54,7 @@ Note: 0x7b7870 / 0x7b7c90 (noted in older sessions) are **PLT stubs**, not the
 real tables. ~194 tag-like ASCII strings exist in `.str` total; ~30 of the table
 slots are NULL / reloc-only / unimplemented (NAS / qplay family). **(unverified)**
 
-A command arrives → tag matched against table → handler thunk → real handler.
+A command arrives -> tag matched against table -> handler thunk -> real handler.
 Most handlers are tiny getters/setters over an in-memory settings struct.
 
 ### Confirmed action commands (tag strings verified present in `.str`)
@@ -79,7 +79,7 @@ should be transcribed here in a follow-up pass.)
 
 ## 2. Audio pipeline
 
-Decode → process → output.
+Decode -> process -> output.
 
 ### Decode
 - **FFmpeg** stack for mp3/flac/wav/aac/aif/m4a/ape/ogg/wma. **(unverified)**
@@ -93,7 +93,7 @@ Decode → process → output.
 
 ### Output routing (`out_dev`, tag 0666)
 LOCAL_ANALOG (CS43131 headphone DAC) / BTSRC / USB_HOST / SPDIF / I2S3.
-(BTSINK is NOT an out_dev route - it is an input/work-mode; see §1 and the work-mode enum in §7.)
+(BTSINK is NOT an out_dev route - it is an input/work-mode; see section 1 and the work-mode enum in section 7.)
 **(unverified)**
 
 ### Volume - set_volume @ 0x489558 **(verified: prologue @0x489558)**
@@ -106,12 +106,12 @@ LOCAL_ANALOG (CS43131 headphone DAC) / BTSRC / USB_HOST / SPDIF / I2S3.
 ### Bluetooth
 - bluealsa-based; source + sink; codecs sbc / aac / ldac. **(unverified)**
 - **Stock BT stack = BLUEZ, decoded from `mq_player` strings** (NOT BSA - `bsa_server`/`bt_enable_bsa*.sh`
-  are dead code, wrong chip BCM4345C5, no caller; mq_player references bsa_server 0×). Full bring-up embedded
+  are dead code, wrong chip BCM4345C5, no caller; mq_player references bsa_server 0x). Full bring-up embedded
   in mq_player: `brcm_patchram_plus --enable_lpm --enable_hci --no2bytes --tosleep 200000 --baudrate 3000000
   --patchram /lib/firmware/bt_bcm/BCM4343A1_001.002.009.1026.1055.hcd /dev/ttyS0` (downloads the chip fw patch
-  over UART → creates working hci0; nothing does this at boot) → `/usr/project/bluetoothd --noplugin=sap
-  --plugin=a2dp,avrcp --mode=source` → `bluealsa -S --device=hci0 --profile=a2dp-source --ldac-abr
-  --ldac-quality=standard --codec=sbc --initial-volume=48` → `hciconfig hci0 up/piscan/class 0x200414` →
+  over UART -> creates working hci0; nothing does this at boot) -> `/usr/project/bluetoothd --noplugin=sap
+  --plugin=a2dp,avrcp --mode=source` -> `bluealsa -S --device=hci0 --profile=a2dp-source --ldac-abr
+  --ldac-quality=standard --codec=sbc --initial-volume=48` -> `hciconfig hci0 up/piscan/class 0x200414` ->
   `bluetoothctl agent on/default-agent/pairable on`. Sink mode = no-LPM patchram + `--mode=sink -p hfp-ag
   --codec=sbc/aac/ldac`. The missing patchram step is why a naive BT enable produces a
   poor scan.
@@ -150,28 +150,28 @@ Columns: `STYLE_NAME, MASTER_GAIN (REAL), PARAMS_JSON (text), STYLE_PRESET (int)
 ### To apply a custom EQ from diskOS
 1. Write/UPDATE the PEQ row (bands JSON + master gain) for a STYLE_PRESET.
 2. Send **0689** to select that preset.
-The player loads bands → computes coeffs @0x448144 → runs the cascade
+The player loads bands -> computes coeffs @0x448144 -> runs the cascade
 @0x447ed0/0x4483a4 on every sample before output.
 
-### ✅ WIRED + CONFIRMED in diskOS (2026-06-30)
-Custom EQ is live: `eqcustom.c` (10-band UI, horizontal scroll) → `mdb_set_peq()` writes PEQ
-slot 11 in the format below → `ui_apply_eq(11)` sends 0689 → **player applies, sound changes
-on-device (user-verified).** `ui_apply_eq` clamp raised 0x0A→20 to reach user slots 11-20.
+### [verified] WIRED + CONFIRMED in diskOS (2026-06-30)
+Custom EQ is live: `eqcustom.c` (10-band UI, horizontal scroll) -> `mdb_set_peq()` writes PEQ
+slot 11 in the format below -> `ui_apply_eq(11)` sends 0689 -> **player applies, sound changes
+on-device (user-verified).** `ui_apply_eq` clamp raised 0x0A->20 to reach user slots 11-20.
 
 ### CAPTURED PARAMS_JSON format (live, V2.09, 2026-06-30)
-Saved a stock "User 1" custom EQ (+12 @ 32 Hz, −12 @ 16 kHz) and read it back. Ground truth:
-- **10 fixed bands**: 32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000 Hz, each ±12.0 dB; plus a **master ±12 dB** = the `MASTER_GAIN` REAL column.
+Saved a stock "User 1" custom EQ (+12 @ 32 Hz, -12 @ 16 kHz) and read it back. Ground truth:
+- **10 fixed bands**: 32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000 Hz, each +/-12.0 dB; plus a **master +/-12 dB** = the `MASTER_GAIN` REAL column.
 - PARAMS_JSON = JSON **array of 10 objects**, e.g. one band:
   `{"filterType":0,"frequency":32,"position":0,"gain":"12.0","qValue":"0.7"}`
   - `filterType` = 0 (peaking) - **int**; `frequency` Hz - **int**; `position` 0-9 band index - **int**.
   - **`gain` and `qValue` are JSON STRINGS** (quoted: `"12.0"`, `"-12.0"`, `"0.7"`), NOT numbers. gain is one-decimal dB; default qValue `"0.7"`.
-- **User slot → STYLE_PRESET**: User 1-10 = **11-20** (User 1 = 11). Built-in presets = 0-10 (off,jazz,rock,r&b,hip-hop,pop,dance,classical,retro,sibilance-atten-1,sibilance-atten-2). Rows 160-169 exist but are unused/placeholder (`PARAMS_JSON` = literal string `"(null)"`).
+- **User slot -> STYLE_PRESET**: User 1-10 = **11-20** (User 1 = 11). Built-in presets = 0-10 (off,jazz,rock,r&b,hip-hop,pop,dance,classical,retro,sibilance-atten-1,sibilance-atten-2). Rows 160-169 exist but are unused/placeholder (`PARAMS_JSON` = literal string `"(null)"`).
 - Stock writes via `UPDATE PEQ SET ... PARAMS_JSON = ? WHERE STYLE_PRESET = ?` then selects with **0689000C<preset hex>** (User 1 = `0689000C000B`).
 - Other stock audio settings seen in the same menu (candidates for diskOS, map to documented name-cmds): Gain H/L, BT codec, SPDIF on/off, DAC digital filter (Fast/Slow LL, Fast/Slow PC, NOS, Wideband FF), DRE on/off.
 
 ---
 
-## 4. The `/ui` frames - player → UI
+## 4. The `/ui` frames - player -> UI
 
 mq_ui opens the **`/ui`** mqueue (name built @0x41b388, recv thread @0x415584,
 `mq_receive` wrapper @0x41b5c8). Each frame = `TAG(4) + %x extension + JSON "other"`
@@ -179,7 +179,7 @@ mq_ui opens the **`/ui`** mqueue (name built @0x41b388, recv thread @0x415584,
 `strncmp(cmd,tag,4)` chain in `ui_ctrl_response` (@0x41bfd0-0x41c098). Recv log
 `[UI RECV]: %s` @0x272960. **(IPC path + format instruction-verified)**
 
-Player→UI frames use **`a`-prefixed** tags (replies/reports) + `06d*` (OTA). Tag
+Player->UI frames use **`a`-prefixed** tags (replies/reports) + `06d*` (OTA). Tag
 meaning is taken from the adjacent log string (string-inferred, high confidence).
 
 | TAG | meaning | payload |
@@ -215,20 +215,20 @@ Verified-present log strings: GET_VERSION_REPLY @0x27255c, GET_WIFI_CONNECT_STAT
 `song_sample_rate`, `song_encoding_rate`, `song_bit_rate`, `song_mimetype`,
 `song_file_path`, `is_sacd/is_cue/is_dsd`, `love` (favorite), `state` (play state),
 `playerflag` (@0x271c08), `curlistlength`, `pos_id`, `playing_num`,
-`work_mode` (@0x271b... 0x272b34), `battery` (@0x272c58). Album art → width/height/
-quality/rgb → `/usr/data/fiio/cover.png`.
+`work_mode` (@0x271b... 0x272b34), `battery` (@0x272c58). Album art -> width/height/
+quality/rgb -> `/usr/data/fiio/cover.png`.
 
-→ For diskOS status indicators (battery/BT/wifi) we read tags a704/a706 (wifi/net),
+-> For diskOS status indicators (battery/BT/wifi) we read tags a704/a706 (wifi/net),
 the BT a6c* family, and `battery` inside a644. **This is the data we were missing.**
 
 ### mq_ui feature surface (subsystems)
-IPC core (`/ui` in; `/player`,`/bt_control` out) · frame dispatch (cJSON) · local
-browse/play (all-songs/album/artist/style/favorite/custom, `db_song_ctrl.c`) ·
-now-playing (`class_play_screen.c`, album art `jpg_to_png.c`) · Roon endpoint ·
-home/menus (app/system/audio/others/popup `.json`) · EQ (`equalizer.json`) ·
-Bluetooth (`bt.json`) · WiFi/NAS (`wpa_supplicant`, `hostapd`, `wl rssi`) ·
-system/version/OTA (`ota_update.c`, `set_local_time.c`) · FiiO Link (UDP
-224.0.0.255 discovery + TCP control, device id "SNOWSKY DISC") · bundled zlog.
+IPC core (`/ui` in; `/player`,`/bt_control` out)  ; frame dispatch (cJSON)  ; local
+browse/play (all-songs/album/artist/style/favorite/custom, `db_song_ctrl.c`)  ;
+now-playing (`class_play_screen.c`, album art `jpg_to_png.c`)  ; Roon endpoint  ;
+home/menus (app/system/audio/others/popup `.json`)  ; EQ (`equalizer.json`)  ;
+Bluetooth (`bt.json`)  ; WiFi/NAS (`wpa_supplicant`, `hostapd`, `wl rssi`)  ;
+system/version/OTA (`ota_update.c`, `set_local_time.c`)  ; FiiO Link (UDP
+224.0.0.255 discovery + TCP control, device id "SNOWSKY DISC")  ; bundled zlog.
 
 ---
 
@@ -246,15 +246,15 @@ SQLite 3.23.1, opened via `sqlite3_open_v2`. DB files (paths verified in `.str`)
 | `/usr/data/bluetooth.db` | bt_devices |
 
 Only `dic.db` ships in the rootfs; the rest are created at first boot under
-`/usr/data/fiio/db/`. db→file binding is from co-located source names + init block
-(high confidence for SONG-family→song.db, SYSCONFIG/theme/NAS→sysconfig.db).
+`/usr/data/fiio/db/`. db->file binding is from co-located source names + init block
+(high confidence for SONG-family->song.db, SYSCONFIG/theme/NAS->sysconfig.db).
 
 ### SONG (song.db) - literal CREATE for MY_LOVE verified verbatim; SONG = same + IS_LOVE
-ID(PK) · PATH · NAME · TITLE · ALBUM · ARTIST · GENRE · DISC · TRACK · IS_CUE ·
-IS_ISO · IS_DSD · OFFSET(BIGINT) · DURATION(BIGINT) · NAME_CODE · TITLE_CODE ·
-ALBUM_CODE · ARTIST_CODE · GENRE_CODE(pinyin sort keys) · ADD_TIME(INT8) ·
-SAMPLE_RATE · BIT_PER_SAMPLE · CHANNELS · BIT_RATE · SONG_MIMETYPE ·
-SONG_PRODUCTION_YEAR · IS_SELECT · ALBUM_ARTIST · ALBUM_ARTIST_CODE ·
+ID(PK)  ; PATH  ; NAME  ; TITLE  ; ALBUM  ; ARTIST  ; GENRE  ; DISC  ; TRACK  ; IS_CUE  ;
+IS_ISO  ; IS_DSD  ; OFFSET(BIGINT)  ; DURATION(BIGINT)  ; NAME_CODE  ; TITLE_CODE  ;
+ALBUM_CODE  ; ARTIST_CODE  ; GENRE_CODE(pinyin sort keys)  ; ADD_TIME(INT8)  ;
+SAMPLE_RATE  ; BIT_PER_SAMPLE  ; CHANNELS  ; BIT_RATE  ; SONG_MIMETYPE  ;
+SONG_PRODUCTION_YEAR  ; IS_SELECT  ; ALBUM_ARTIST  ; ALBUM_ARTIST_CODE  ;
 **IS_LOVE** (SONG only, added by upgrade ALTER - favorites flag).
 MY_LOVE = same minus IS_LOVE, `UNIQUE(PATH,TRACK)`. **(CREATE verified @mq_ui.str:9793)**
 
@@ -264,17 +264,17 @@ PLAYLIST_INFO(ID) ON DELETE CASCADE`, `UNIQUE(PLAYLIST_ID,PATH,TRACK)`.
 
 ### PLAYLIST_INFO (song.db) - parent of CUSTOM_PLAYLIST. ID(PK) firm; name/count inferred (LOW confidence).
 
-### PLAY_LIST (song.db) - queue registry: ID(PK) · LIST_ID · LIST_NAME.
+### PLAY_LIST (song.db) - queue registry: ID(PK)  ; LIST_ID  ; LIST_NAME.
 
-### LIST_SONG_0/1/2 (song.db) - active play queues, built by `INSERT INTO LIST_SONG_%d ... SELECT ... FROM SONG` (verified). Cols: ID · LIST_ID · POS_ID(=MUSIC_ID join key) · PATH · NAME · TITLE · ALBUM · ARTIST · GENRE · DISC · TRACK · IS_CUE · IS_ISO · OFFSET · DURATION · ADD_TIME · IS_SELECT · SONG_TYPE · ALBUM_ARTIST.
+### LIST_SONG_0/1/2 (song.db) - active play queues, built by `INSERT INTO LIST_SONG_%d ... SELECT ... FROM SONG` (verified). Cols: ID  ; LIST_ID  ; POS_ID(=MUSIC_ID join key)  ; PATH  ; NAME  ; TITLE  ; ALBUM  ; ARTIST  ; GENRE  ; DISC  ; TRACK  ; IS_CUE  ; IS_ISO  ; OFFSET  ; DURATION  ; ADD_TIME  ; IS_SELECT  ; SONG_TYPE  ; ALBUM_ARTIST.
 
-### MEMORY_PLAY (song.db) - resume state, single row. ID(=1) · MUSIC_ID · IS_PLAYING · POSITION · IS_CUE · IS_ISO · TRACK. **(UPDATE verified @mq_player.str:13412)**
+### MEMORY_PLAY (song.db) - resume state, single row. ID(=1)  ; MUSIC_ID  ; IS_PLAYING  ; POSITION  ; IS_CUE  ; IS_ISO  ; TRACK. **(UPDATE verified @mq_player.str:13412)**
 
-### PEQ (song.db) - see §3. ID · STYLE_NAME · MASTER_GAIN(REAL) · PARAMS_JSON · STYLE_PRESET.
+### PEQ (song.db) - see section 3. ID  ; STYLE_NAME  ; MASTER_GAIN(REAL)  ; PARAMS_JSON  ; STYLE_PRESET.
 
-### CUSTOM_THEME (sysconfig.db) - ID · POS_ID · NAME · PATH · ALIAS · TYPE · IS_SYSTEM · ATTR · ALPHA · LOCK_TIME/DATE/BATTERY/ID3/MEM_TYPE · FRONT_COLOR.
-### NAS_CONFIG (sysconfig.db) - ID · NAS_NAME · NAS_IP · USER · (password) · TYPE · AUTO_LOGIN.
-### bt_devices (bluetooth.db) - ID · NAME · ADDR(MAC key) · CODEC · SAMPLING · VOLUME.
+### CUSTOM_THEME (sysconfig.db) - ID  ; POS_ID  ; NAME  ; PATH  ; ALIAS  ; TYPE  ; IS_SYSTEM  ; ATTR  ; ALPHA  ; LOCK_TIME/DATE/BATTERY/ID3/MEM_TYPE  ; FRONT_COLOR.
+### NAS_CONFIG (sysconfig.db) - ID  ; NAS_NAME  ; NAS_IP  ; USER  ; (password)  ; TYPE  ; AUTO_LOGIN.
+### bt_devices (bluetooth.db) - ID  ; NAME  ; ADDR(MAC key)  ; CODEC  ; SAMPLING  ; VOLUME.
 
 ### SYSCONFIG (sysconfig.db) - single row, all INT, `UPDATE SYSCONFIG set %s = %d where ID = 1` (verified @0x25a910)
 Column names verified from descriptor @mq_player.str:13091+. Runtime pak dump
@@ -282,44 +282,44 @@ Column names verified from descriptor @mq_player.str:13091+. Runtime pak dump
 (sic),RGB_LEVEL,MUTE,VOL_MODE,RGB_STATUS,MEM_PLAY`. Full key set (names verified;
 **enum value mappings NOT proven** - inferred from name + cross-ref to command tags):
 
-DSD_MODE · OUT_DEV/DEVICE_OUTPUT(→0666) · VOLUME · WORK_MODE · LIGHT_LEVEL ·
-LIGTH_ON_TIME(backlight timeout, sic) · RGB_LEVEL · MUTE · VOL_MODE · RGB_STATUS ·
-RGB_COLOUR · TRIGGER_IN · SYS_THEME · LANGUAGE · USB_MODE · NETWORK_MODE ·
-EQ_TYPE(→0689, =PEQ.STYLE_PRESET) · MAX_VOL · BALANCE_VOL · POWER_SAVE ·
-FILTER_TYPE(DAC digital filter) · PLAY_MODE(→0102) · MEMORY_PLAY(resume) ·
-FOLDER_JUMP · PLAY_GAP(gapless) · INPUT_MODE · VOL_KNOB_MODE · OTA_CFG · BATTERY ·
-BT_CODEC · SCREEN_ROT · PO_PRE_VOL/PO_VOL/PRE_VOL · THEME_MODE · CHARGE_PROTECT ·
-LOCK_THEME · TREBLE · BASS · WIFI_STATUS · BT_STATUS · LO_DISABLE · OS_MODE ·
-DSD_DECODE · SPDIF · AUTO_TIME · DRE_STATUS · LOCAL_IMG_ANIM · IMG_ANIM_BRIGHTNESS ·
-ARM_VERSION · MCU_OTA_FAILED_TIME · KEY_SINGLE/DOUBLE/LONG_CLICK_SLE(gesture→action) ·
-ARTIST_CLASS_TYPE · AUDIO_VOLUME_SET.
+DSD_MODE  ; OUT_DEV/DEVICE_OUTPUT(->0666)  ; VOLUME  ; WORK_MODE  ; LIGHT_LEVEL  ;
+LIGTH_ON_TIME(backlight timeout, sic)  ; RGB_LEVEL  ; MUTE  ; VOL_MODE  ; RGB_STATUS  ;
+RGB_COLOUR  ; TRIGGER_IN  ; SYS_THEME  ; LANGUAGE  ; USB_MODE  ; NETWORK_MODE  ;
+EQ_TYPE(->0689, =PEQ.STYLE_PRESET)  ; MAX_VOL  ; BALANCE_VOL  ; POWER_SAVE  ;
+FILTER_TYPE(DAC digital filter)  ; PLAY_MODE(->0102)  ; MEMORY_PLAY(resume)  ;
+FOLDER_JUMP  ; PLAY_GAP(gapless)  ; INPUT_MODE  ; VOL_KNOB_MODE  ; OTA_CFG  ; BATTERY  ;
+BT_CODEC  ; SCREEN_ROT  ; PO_PRE_VOL/PO_VOL/PRE_VOL  ; THEME_MODE  ; CHARGE_PROTECT  ;
+LOCK_THEME  ; TREBLE  ; BASS  ; WIFI_STATUS  ; BT_STATUS  ; LO_DISABLE  ; OS_MODE  ;
+DSD_DECODE  ; SPDIF  ; AUTO_TIME  ; DRE_STATUS  ; LOCAL_IMG_ANIM  ; IMG_ANIM_BRIGHTNESS  ;
+ARM_VERSION  ; MCU_OTA_FAILED_TIME  ; KEY_SINGLE/DOUBLE/LONG_CLICK_SLE(gesture->action)  ;
+ARTIST_CLASS_TYPE  ; AUDIO_VOLUME_SET.
 Config is committed to flash on write (`now try to save config to flash` @0x25a...).
 
 ---
 
 ## 7. Network streaming + USB modes + COMPLETENESS
 
-**Major gap found:** the earlier sections missed the network-streaming receivers and several subsystems. The device is far more capable than §1-6 implied.
+**Major gap found:** the earlier sections missed the network-streaming receivers and several subsystems. The device is far more capable than section 1-6 implied.
 
 ### Work-mode / OUT_DEV enum (the master "audio source" list) - names VERIFIED
 mq_player has ONE work-mode enum (pointer-array @ ~0x7bb0a0 data; names in `.str` @0x25f9e0+). Switching mode is **name-driven**: a supervisor `@0x444604` does `strcmp(name,"AIRPLAY"/"DLNA"/"ROON"/...)` and starts/stops that receiver. **Names verified present; integer indices unverified:**
-`0 NO_DEFINED · 1 I2S3_OUT · 2 USB_HOST_NULL · 3 NO_WORK_MODE · 4 LOCALPLAYER · 5 BTSINK · 6 ANALOG · 7 UAC(USB-DAC) · 8 DLNA · 9 AIRPLAY · 10 ROON · 11 SPDIF_OPT · 12 SPDIF_RX · 13 DMR · 14 DMC · 15 DMS · 16 MIX · 17 I2S_IN · 18 STREAM_AUDIO` (+ QPLAY). sysconfig keys NETWORK_MODE (cfg+0x5c) and OUT_DEV both feed this.
+`0 NO_DEFINED  ; 1 I2S3_OUT  ; 2 USB_HOST_NULL  ; 3 NO_WORK_MODE  ; 4 LOCALPLAYER  ; 5 BTSINK  ; 6 ANALOG  ; 7 UAC(USB-DAC)  ; 8 DLNA  ; 9 AIRPLAY  ; 10 ROON  ; 11 SPDIF_OPT  ; 12 SPDIF_RX  ; 13 DMR  ; 14 DMC  ; 15 DMS  ; 16 MIX  ; 17 I2S_IN  ; 18 STREAM_AUDIO` (+ QPLAY). sysconfig keys NETWORK_MODE (cfg+0x5c) and OUT_DEV both feed this.
 
 ### AirPlay receiver - BUILT IN (was completely missed)
-mq_player embeds a **full shairport-sync fork**: `fiio_airplay.c` + `src/shairport.c, rtsp.c, rtp.c, dacp.c, metadata.c, mdns_avahi.c, player.c` + `libshairplay.so`. Advertises **`_raop._tcp`/`_airplay._tcp`** as **"SNOWSKY DISC"**. Config: `/usr/project/config/airplay2/x2000_airplay2.conf` (Shairport-Sync style, AirPlay 2). Flow: supervisor sees mode "AIRPLAY" → sets `airplay_play=1` (@0x7efbe4) → `start_airplay@0x436008` → pthread `airplay_func@0x435fc0` → shairport loop. Needs **wlan0 up** (`start_switch_network_mode_thread@0x46e634` monitors `/sys/class/net/wlan0/operstate`=="up", then emits `/ui` tag **a706** = GET_NET_STATUS_REPLY - a706 is STATUS, NOT the trigger). Has `airplay_artwork_thread`, DACP remote. Audio → ALSA `snd_pcm_writei` to the DAC after out_dev switch. **TRIGGER COMMAND TAG (SUPERSEDED for V2.40: it is `0657000C000A`, mode 0A = AirPlay, hardware-confirmed - see COMMAND_MAP.md; the AIRPLAY=9 guess below is wrong):** (a `06xx` work-mode-switch carrying AIRPLAY=9, sent via `ui_send_cmd@0x43f82c` → mqueue `/player` idx 3, frame `TAG(4)+ext1(4hex)+len(4hex)+data`). Player also has a name-string command dispatch @0x482328 (e.g. `SET_USB_MODE`). **(SUPERSEDED: the literal tags are now known - AirPlay=`0657000C000A` and the rest of the 0657 mode table, hardware-confirmed on V2.40; see COMMAND_MAP.md.)**
+mq_player embeds a **full shairport-sync fork**: `fiio_airplay.c` + `src/shairport.c, rtsp.c, rtp.c, dacp.c, metadata.c, mdns_avahi.c, player.c` + `libshairplay.so`. Advertises **`_raop._tcp`/`_airplay._tcp`** as **"SNOWSKY DISC"**. Config: `/usr/project/config/airplay2/x2000_airplay2.conf` (Shairport-Sync style, AirPlay 2). Flow: supervisor sees mode "AIRPLAY" -> sets `airplay_play=1` (@0x7efbe4) -> `start_airplay@0x436008` -> pthread `airplay_func@0x435fc0` -> shairport loop. Needs **wlan0 up** (`start_switch_network_mode_thread@0x46e634` monitors `/sys/class/net/wlan0/operstate`=="up", then emits `/ui` tag **a706** = GET_NET_STATUS_REPLY - a706 is STATUS, NOT the trigger). Has `airplay_artwork_thread`, DACP remote. Audio -> ALSA `snd_pcm_writei` to the DAC after out_dev switch. **TRIGGER COMMAND TAG (SUPERSEDED for V2.40: it is `0657000C000A`, mode 0A = AirPlay, hardware-confirmed - see COMMAND_MAP.md; the AIRPLAY=9 guess below is wrong):** (a `06xx` work-mode-switch carrying AIRPLAY=9, sent via `ui_send_cmd@0x43f82c` -> mqueue `/player` idx 3, frame `TAG(4)+ext1(4hex)+len(4hex)+data`). Player also has a name-string command dispatch @0x482328 (e.g. `SET_USB_MODE`). **(SUPERSEDED: the literal tags are now known - AirPlay=`0657000C000A` and the rest of the 0657 mode table, hardware-confirmed on V2.40; see COMMAND_MAP.md.)**
 
 ### Also built-in network receivers (missed): 
 - **DLNA/UPnP renderer** - `dlna_player.c`, UPnP RenderingControl/AVTransport SCPD. (mode DLNA=8)
 - **Roon Ready endpoint** - `roon_player.c` + `libroon.so` RAAT (`roon_transport_*`, volume/seek/shuffle). (mode ROON=10) UI screen `ui_roon_play.c`.
 - **QPlay** (Tencent/QQ Music) receiver - `mq_player_server_qplay.c`, MD5(Seed+PSK) auth, SetNetwork/SetLyric.
-- **BT SINK** (phone→player A2DP in) - `bt_sink_server.c/bt_sink_control.c` + AVRCP. (mode BTSINK=5)
+- **BT SINK** (phone->player A2DP in) - `bt_sink_server.c/bt_sink_control.c` + AVRCP. (mode BTSINK=5)
 
 ### USB modes (partially missed)
-USB_MODE sysconfig + `usb_mode_change_handler@0x48eb80` (named cmd `SET_USB_MODE`@dispatch 0x482328). Gadgets via configfs: **`uac_demo`** (USB-DAC, functions uac1.a/uac2.a, /dev/usb_dac, UAC_SRATE→/ui tag aa1b) = work-mode UAC(7); **`storage_demo`** (card-reader, mass_storage.0, lun.0/file=/dev/mmcblk0). `set_usb_host`@0x24da24. **USB_MODE integer values (charge/DAC/reader/host) NOT yet mapped.**
+USB_MODE sysconfig + `usb_mode_change_handler@0x48eb80` (named cmd `SET_USB_MODE`@dispatch 0x482328). Gadgets via configfs: **`uac_demo`** (USB-DAC, functions uac1.a/uac2.a, /dev/usb_dac, UAC_SRATE->/ui tag aa1b) = work-mode UAC(7); **`storage_demo`** (card-reader, mass_storage.0, lun.0/file=/dev/mmcblk0). `set_usb_host`@0x24da24. **USB_MODE integer values (charge/DAC/reader/host) NOT yet mapped.**
 
 ### CORRECTIONS to earlier sections
-- **NAS is FULLY IMPLEMENTED** (`nas_control.c`: `mount -t cifs vers=3.0`, NFS, `smbclient -L`; NAS_CONFIG live) - §1's "NAS/qplay = NULL/unimplemented" was WRONG.
-- **Tag counts:** ~**221** distinct `/player` `0xxx` command tags + ~**102** `axxx` reply tags (mq_ui emits ~161 cmds, handles ~102 replies). §1/§4 documented ~10 + ~30 → **~95% of the command surface is still undocumented** (entire a4xx reply family untouched).
+- **NAS is FULLY IMPLEMENTED** (`nas_control.c`: `mount -t cifs vers=3.0`, NFS, `smbclient -L`; NAS_CONFIG live) - section 1's "NAS/qplay = NULL/unimplemented" was WRONG.
+- **Tag counts:** ~**221** distinct `/player` `0xxx` command tags + ~**102** `axxx` reply tags (mq_ui emits ~161 cmds, handles ~102 replies). section 1/section 4 documented ~10 + ~30 -> **~95% of the command surface is still undocumented** (entire a4xx reply family untouched).
 - Other missed subsystems: **lyrics** (`lrc_paser.c`, `/usr/data/fiio/encoder.lrc`!), generic stream/I2S_IN/capture (`stream_audio.c`,`player_capture.c`), animated gif screensaver (LOCAL_IMG_ANIM), serial-number (`sn_nb.c`), image loaders (bmp/jpeg/png/yabmp), SACD/DST internals, MCU OTA (`ENTER_MCU_UPDATE_MODE`), full SPI/MCU handler family.
 
 ## 8. FULL command map - inventory complete, meanings mixed-confidence
@@ -327,20 +327,20 @@ USB_MODE sysconfig + `usb_mode_change_handler@0x48eb80` (named cmd `SET_USB_MODE
 **V2.09 dispatch tables** (entry = `{tag_str_ptr, handler_thunk_ptr}` 8B; thunks tail-jump via GOT to real handler):
 - **Table A @0x7c9d30 = 131 entries** (terminator @0x7ca148). Tags 06xx/07xx/08xx/0a51.
 - **Table B @0x7ca150 = 75 entries** (terminator @0x7ca3a8). Tags 00xx/01xx/02xx/04xx/05xx. ~36 in-table NULL (declared-unimplemented), ~11 thunk-but-GOT-null, ~28 live.
-- **MCU/SPI name-commands** via hw_ctrl.c @0x48d0b8 + sysconfig-key dispatch @0x488000 (NOT 0x482328 = that's the tag↔enum resolver).
+- **MCU/SPI name-commands** via hw_ctrl.c @0x48d0b8 + sysconfig-key dispatch @0x488000 (NOT 0x482328 = that's the tag<->enum resolver).
 
-**⚠️ RELIABILITY:** tag list = reliable (mechanical table walk). Per-tag MEANINGS: ~36 string-VERIFIED, ~80 INFERRED-from-family, ~15 UNKNOWN(runtime-registered GOT=0). **Some conflict with the 1.95-era LIVE-tested set** (1.95 tables were @0x7b7870/0x7b7c90; V2.09 layout differs). **RESOLVED:** the `0657`/`0666`/`06b3` "close_player" reading was a false positive - all three call a shared teardown preamble at the start of a disruptive mode change; that teardown is NOT their meaning. `0657`=source/work-mode transition, `0666`=output route (2/4/6), `06b3`=BT codec select. **Treat remaining INFERRED meanings as needing verification; trust live tests + resolved-handler traces over family inference.**
+**! RELIABILITY:** tag list = reliable (mechanical table walk). Per-tag MEANINGS: ~36 string-VERIFIED, ~80 INFERRED-from-family, ~15 UNKNOWN(runtime-registered GOT=0). **Some conflict with the 1.95-era LIVE-tested set** (1.95 tables were @0x7b7870/0x7b7c90; V2.09 layout differs). **RESOLVED:** the `0657`/`0666`/`06b3` "close_player" reading was a false positive - all three call a shared teardown preamble at the start of a disruptive mode change; that teardown is NOT their meaning. `0657`=source/work-mode transition, `0666`=output route (2/4/6), `06b3`=BT codec select. **Treat remaining INFERRED meanings as needing verification; trust live tests + resolved-handler traces over family inference.**
 
-**String-VERIFIED V2.09 commands (Table A):** 0802=song count, 0620=get WIFI_MAC(/usr/data/fiio/nb.txt), 0704=wifi scan list, 0705=wifi connect(psid/passwd), 0800=write wpa_supplicant.conf, 0701=wifi init, 0700=close network card, 0720/0722=OTA(wget ota_patch), 0639/0689/0690/0634/0641=media-info query→a639 reply, 0675/0630=EQ/PEQ get(gain/filterType/frequency), **0678=set PEQ band(filterType/frequency/gain/qValue)**, 0621=DROP DB tables, 0624=mount/storage, 0815=set MEMORY_PLAY position, 0820/0821/0822=key single/double/long action, 0647=gapless, 0648=artist_class_type, **06b1=BT sample-rate param(0x40d4d8), 06b2=BT bit-depth param(0x40d66c), 06b3=BT CODEC SELECT(0=SBC 1=AAC 2/3/4=LDAC; 0x40eaf4; SBC frame `06b3000C0000` pins 44100), 06b4=LDAC QUALITY only(0x40dbe8; mob/std/high)**, 06b7=BT paired, 06c0=BT trust/power, 06c1=BT alias, 06c4=BT disconnect/remove. (0657/0666/06b3 close_player = RESOLVED false positive, see above.)
-**Table B verified:** **0100=main PLAY** (jumptable @0x650e2c by list_type), 0201=transport play/pause toggle (generic, →0x419ff4; NOT Roon-specific), 0112=playlist add song, 0115=add to custom list, 0113=love-list delete, 0114=custom-list delete, 0117=playlist reorder(src/dst), 0408=file/folder browse, 0413=album query, 0414=style/genre query, 02xx=NAS scan/browse(mq_player_server_nas.c, many GOT-null/unimplemented).
+**String-VERIFIED V2.09 commands (Table A):** 0802=song count, 0620=get WIFI_MAC(/usr/data/fiio/nb.txt), 0704=wifi scan list, 0705=wifi connect(psid/passwd), 0800=write wpa_supplicant.conf, 0701=wifi init, 0700=close network card, 0720/0722=OTA(wget ota_patch), 0639/0689/0690/0634/0641=media-info query->a639 reply, 0675/0630=EQ/PEQ get(gain/filterType/frequency), **0678=set PEQ band(filterType/frequency/gain/qValue)**, 0621=DROP DB tables, 0624=mount/storage, 0815=set MEMORY_PLAY position, 0820/0821/0822=key single/double/long action, 0647=gapless, 0648=artist_class_type, **06b1=BT sample-rate param(0x40d4d8), 06b2=BT bit-depth param(0x40d66c), 06b3=BT CODEC SELECT(0=SBC 1=AAC 2/3/4=LDAC; 0x40eaf4; SBC frame `06b3000C0000` pins 44100), 06b4=LDAC QUALITY only(0x40dbe8; mob/std/high)**, 06b7=BT paired, 06c0=BT trust/power, 06c1=BT alias, 06c4=BT disconnect/remove. (0657/0666/06b3 close_player = RESOLVED false positive, see above.)
+**Table B verified:** **0100=main PLAY** (jumptable @0x650e2c by list_type), 0201=transport play/pause toggle (generic, ->0x419ff4; NOT Roon-specific), 0112=playlist add song, 0115=add to custom list, 0113=love-list delete, 0114=custom-list delete, 0117=playlist reorder(src/dst), 0408=file/folder browse, 0413=album query, 0414=style/genre query, 02xx=NAS scan/browse(mq_player_server_nas.c, many GOT-null/unimplemented).
 **MCU/SPI name-commands (hw_ctrl.c, SPI to MCU):** GET/SET_DEVICE_MAX_VOL, SET_DEVICE_VOL, GET/SET_INPUT_MODE, SET_OUTPUT_MODE, SET_GAIN, GET/SET_DAC_FILTER, **SET_USB_MODE**, GET/SET_EQ_PRE, GET/SET_EQ_PARAMETER, SET_EQ_RESET, SAVE_EQ, SET_AUDIO_FORMAT, SET_FACTORY, **ENTER_MCU_UPDATE_MODE**, SET_MCU_POWER, SET_MUTE, SET_POWER_DOWN_TO_MCU (shutdown path, 63 call sites), GET/SET_ZERO_DATA_DETECT_TIME, BT_REPORT_RATE/STATE/CODEC_TO_MCU. sysconfig-key setters: RGB_COLOUR/TRIGGER_IN/SYS_THEME/LANGUAGE/USB_MODE/NETWORK_MODE/EQ_TYPE/MAX_VOL/BALANCE_VOL/POWER_SAVE/FILTER_TYPE/PLAY_MODE/FOLDER_JUMP/PLAY_GAP/INPUT_MODE/VOL_KNOB_MODE/OTA_CFG/PO_PRE_VOL/PO_VOL/PRE_VOL/TREBLE/BASS/LO_DISABLE/OS_MODE/DSD_DECODE.
 
 ## 6. TODO (next passes)
 - [x] ~~Live-verify 0657/0666~~ RESOLVED (handler-trace): 0657=source/work-mode transition, 0666=output route(2/4/6). "close_player" was a shared teardown preamble.
-- [ ] **Pin the AirPlay trigger tag** (mq_ui work-mode menu → callers of ui_send_cmd@0x43f82c) - the one fact needed to enable AirPlay from diskOS.
-- [x] **0622 is NOT a working rescan on V2.09:** diskOS "Rescan Library" sends 0622 → runs a long scan
+- [ ] **Pin the AirPlay trigger tag** (mq_ui work-mode menu -> callers of ui_send_cmd@0x43f82c) - the one fact needed to enable AirPlay from diskOS.
+- [x] **0622 is NOT a working rescan on V2.09:** diskOS "Rescan Library" sends 0622 -> runs a long scan
   (~13min, scan_songs_thread) but writes 0 rows to song.db (mtime unchanged). Clearing SONG + reboot also scanned but
-  wrote nothing. So song.db must be hand-built (laptop `tools/build_db.py` from sync_manifest.json → SONG +
+  wrote nothing. So song.db must be hand-built (laptop `tools/build_db.py` from sync_manifest.json -> SONG +
   PLAYLIST_INFO + CUSTOM_PLAYLIST; diskOS lib sorts by TEXT so *_CODE only affects play-queue order). The real scan
   trigger (comm_scan_songs_thread) is still un-pinned. song.db schema is in this catalogue's table notes / dump from
   song.db.bak. Stock leaves DURATION/SAMPLE_RATE/BIT_RATE/CHANNELS=0 and ALBUM=TITLE for tagless rips - match that.
@@ -350,32 +350,32 @@ USB_MODE sysconfig + `usb_mode_change_handler@0x48eb80` (named cmd `SET_USB_MODE
     by `addiu v1,v1,856` @0x48eb84). Reads/writes current usb_mode global @ **0x822d20**. Branches on the
     target mode value (s0): observed cases 2, 5, 6.
   - On **usb_mode==2** (`bne s0,2` fall-through @0x48ebc4) it accesses
-    **`/sys/kernel/config/usb_gadget/storage_demo`** (lui 0x66 + 13620 = vaddr 0x663534) → builds a
+    **`/sys/kernel/config/usb_gadget/storage_demo`** (lui 0x66 + 13620 = vaddr 0x663534) -> builds a
     `mass_storage.0` function, **lun.0/file = `/dev/mmcblk0`** (whole SD), toggles cdrom/nofua/removable/ro,
     binds the UDC. (All configfs paths string-verified @ file 0x263534-0x263d8f.)
   - **CLEAN handoff CONFIRMED:** before/while exporting it UNMOUNTS the SD - `unmount_udisk` @0x668ed4 (called
-    ~7× around 0x470134-0x470388) runs `umount %s` with 5 retries + `umount -lf %s 2>/dev/null` lazy-force
+    ~7x around 0x470134-0x470388) runs `umount %s` with 5 retries + `umount -lf %s 2>/dev/null` lazy-force
     fallback on `/tmp/sdcard` (strs @0x268be8/0x266e40/0x268e40). So it properly releases mq_player's SD hold
     (the EBUSY blocker) - no corruption, unlike a raw composite-gadget export.
   - Trigger: **`SET_USB_MODE`** name-command (str @vaddr 0x66fe40; dispatch refs @0x48232c/0x4863ec/0x48d154;
     builders @0x408044/0x40fa94) and/or the `USB_MODE` sysconfig field. EXACT payload/value-encoding for
     SET_USB_MODE still to pin (one more trace), but the value is **2**.
-  - ⚠ CAVEAT (untested): a UDC binds ONE gadget at a time, so binding `storage_demo` almost certainly UNBINDS
-    our `serial_demo` ACM → **the serial shell will drop while in reader mode**; exiting reader mode (mode
+  - ! CAVEAT (untested): a UDC binds ONE gadget at a time, so binding `storage_demo` almost certainly UNBINDS
+    our `serial_demo` ACM -> **the serial shell will drop while in reader mode**; exiting reader mode (mode
     switch / replug) should restore it. TEST LIVE WITH USER PRESENT (power-cycle fallback). This is still far
     safer than 0666 (no player crash / MCU-reboot path).
-  - ⇒ This unblocks **music-transfer-over-USB** via the stock mechanism: set USB_MODE=2 → laptop sees the SD as
-    a USB drive → copy 32GB at USB speed + fsck → exit reader mode → in-device rescan. Replaces the unsafe
+  - => This unblocks **music-transfer-over-USB** via the stock mechanism: set USB_MODE=2 -> laptop sees the SD as
+    a USB drive -> copy 32GB at USB speed + fsck -> exit reader mode -> in-device rescan. Replaces the unsafe
     wifi-push (watchdog reboots) and the blocked raw-MSC attempt.
 - [ ] Transcribe the full 221-tag command table + 102 a-frame replies.
 - [ ] Transcribe the full 207-tag command table (A+B) with handler addresses.
-- [ ] Verify audio/decoder/BT/DSD claims (§2) at instruction level (currently unverified).
-- [ ] Resolve SYSCONFIG enum value→option integer mappings.
+- [ ] Verify audio/decoder/BT/DSD claims (section 2) at instruction level (currently unverified).
+- [ ] Resolve SYSCONFIG enum value->option integer mappings.
 - [ ] Pin PLAYLIST_INFO's full column list (currently only ID firm).
 - [ ] diskOS wiring: status indicators from a644/a704/a706/a6c* + custom-EQ via PEQ write + 0689.
 
 ## 5b. SYSCONFIG - the master settings table (decoded 2026-06-30)
-`/usr/data/fiio/db/sysconfig.db` → table **SYSCONFIG** (single row), one INT column per setting.
+`/usr/data/fiio/db/sysconfig.db` -> table **SYSCONFIG** (single row), one INT column per setting.
 This is where every audio/system setting persists (the config-named commands write here).
 Columns incl: DSD_MODE, OUT_DEV, VOLUME, WORK_MODE, LIGHT_LEVEL(brightness), LIGTH_ON_TIME,
 MUTE, VOL_MODE, USB_MODE, NETWORK_MODE, EQ_TYPE(=0689 preset), MAX_VOL, BALANCE_VOL(channel
@@ -410,7 +410,7 @@ Background-noise tags to ignore: 0807 (recurring 0/1 status), 0704 (wifi scan).
   codec-settings menu sends payload-less `06b3000C0000`=SBC `...0001`=AAC `...0002/3/4`=LDAC mob/std/high.
   **But the ROUTE-to-speaker frame (live-captured 2026-08-03) is `06b3<len>000X<MAC>`** (X=codec, MAC payload
   kept for stock frame-shape; worker ignores it). diskOS route uses `06b3001D0000<MAC>` (SBC). `06b4` is
-  LDAC-quality only. **Full working BT-transmit sequence → COMMAND_MAP.md "BT AUDIO OUTPUT" section.**
+  LDAC-quality only. **Full working BT-transmit sequence -> COMMAND_MAP.md "BT AUDIO OUTPUT" section.**
 - Also re-confirmed: `0666`=output route, `0642`=USB gadget selector (from startup sync).
 
 ## 5d. More settings - DECODED LIVE 2026-06-30 (strace stock mq_ui, clean batch)
