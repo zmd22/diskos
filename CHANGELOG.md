@@ -5,6 +5,146 @@ All notable changes to diskOS are documented here.
 Entries follow the Keep a Changelog format, with Added, Changed, and Fixed categories where applicable.
 diskOS remains beta software; version numbers do not imply broad hardware or feature validation.
 
+## [1.2.0] - 2026-10-02
+
+Adds V2.57 firmware support, more library and display choices, and signed in-app diskOS updates.
+Installing 1.2.0 requires the complete installer and a new flash.
+
+### Added
+
+- Install from unmodified official V2.57 firmware, alongside V2.09, V2.28, and V2.40. The
+  installer checks the Disc's existing kernel and recovery against the image before writing.
+- Seven themes alongside Default, dark and light appearance, Outdoor Mode, font sizes, and an
+  interface language choice with English fallback for missing text.
+- Up Next shows the current queue and lets you jump to an upcoming song. Artists and Genres can
+  open albums or All Songs.
+- Library indexing for AAC, OGG, APE, AIFF, WMA, DSF, DFF, DTS, external CUE sheets, and SACD ISO
+  track rows. Indexing does not guarantee playback of every format.
+- Song Info with available audio and file details; settings for Album Artist grouping, Play
+  Through Folders, track numbers, online album art, and online lyrics. Local and embedded lyrics
+  remain available when online lyrics are off; timed lyrics can follow playback.
+- Song lengths in library song lists and Up Next, read from the file when the library is scanned.
+  Songs whose length can't be read show no length.
+- Manual date and time, time-zone choice, and Automatic Time. A new startup animation has a
+  selectable Disc body colour.
+- On V2.57, screen rotation, volume-key actions, idle power-off, a charging limit, and a choice
+  to pause or request shutdown when the Sleep Timer ends.
+- Bluetooth Codec selection on V2.57. On other firmware the row says "Not on this firmware".
+- Device Info, battery/board temperature, and a reset for diskOS appearance and behavior
+  settings that keeps music, network, Last.fm, EQ, and audio settings.
+- Signed in-app diskOS updates for later releases. The 1.2.0 release image includes the diskOS
+  release key by default; its GUI checkbox, "Allow diskOS updates over Wi-Fi", starts checked.
+  Untick it or use `--no-ota` to omit the key; `--ota-key PATH` uses your own public key.
+  Settings > System > Update diskOS updates only the diskOS app, not stock firmware or the whole
+  image. Allow diskOS Updates can stop downloads; turning it off with a staged update offers
+  Discard or Cancel. A trial update offers Keep or Go back and rolls back if it fails to start.
+  The first update over Wi-Fi will be a release after 1.2.0.
+- A macOS release package for Apple Silicon with prebuilt flash tools.
+
+### Changed
+
+- Album artwork is now decoded by a new helper, `diskos-artdec`, instead of the stock `ffmpeg`
+  command (which stock V2.57 ships without image decoders). It runs as a separate short-lived
+  process and covers embedded and same-folder artwork on every supported firmware. Cached covers
+  are rebuilt once after the update.
+- Restart is back in Settings. It waits for diskOS card work and a successful flush; if either
+  cannot finish, it reports the problem and leaves the Disc running.
+- Library rescans show progress and a Stop action. Cancelling keeps the previous library.
+- Playlists retain their order and appear in the stock playlist registry. You can add a displayed
+  album, artist, or genre song list, remove a song, and rename, export, or delete a playlist. M3U
+  import searches card folders within limits and preserves a differing same-name playlist.
+- V2.57 Favourites use the player's favourite queue and row identity. Gain is available on V2.57;
+  its Custom EQ editor is view-only.
+- Update from SD Card identifies a file named like a stock update and explains the stock route;
+  diskOS does not run that update.
+- Wi-Fi lists place the connected network first and handle encoded names, passwords, and
+  connection feedback more carefully.
+- Setup and tool builds now work on Arch, CachyOS, and Fedora as well as Debian and Ubuntu;
+  `doctor` identifies the Linux distribution.
+
+### Fixed
+
+- The installer reports a USB-permission problem when it sees a mask-ROM Disc but cannot open it.
+- Saving the clock no longer waits on the interface loop for the RTC.
+- Album cover caching no longer depends on an inode that can change for the same card file.
+  Saved accent colours can refresh when cover content changes.
+- Playlist export uses a unique temporary file instead of a fixed name that could overwrite a
+  user's file.
+- A refused playback send no longer opens Now Playing as if playback started. Delayed local-player
+  setup no longer interrupts a song that has already begun. CUE and SACD track replay avoids a
+  timeout route reset that could stop a live stream.
+- A back swipe starting on a control no longer also taps that control, which could go back two
+  screens or change a setting.
+- Long one-button messages are no longer covered by the OK button.
+- With Weather on Home off, diskOS no longer makes a weather request at startup.
+
+## [1.1.3] - 2026-09-24
+
+A safety release. The stock FiiO player, which diskOS runs alongside, tries to unmount the microSD
+card and then deletes everything at the card's mount point, without checking that the unmount
+worked. If the card is still mounted, this can delete its contents. The flaw is confirmed in the
+stock player on V2.09, V2.28, and V2.40. It has not been proven to be the cause of the two reported
+card wipes. Every diskOS user should update; updating requires the complete installer and a new flash.
+
+### Added
+
+- A delete guard in the flashed image, at `/bin/rm` and first on the stock player's `PATH` (so the
+  stock fallback and watchdog launches are covered too). It refuses `rm` on the card or anything on
+  it; the card's folder can only be removed when it is empty and unmounted. It blocks this specific
+  deletion path, not every possible way to lose data.
+- A boot selector that runs before diskOS starts and decides once per boot between diskOS and stock.
+  Any missing or invalid result boots stock.
+- Hold Volume Up for about three seconds to force-close an external app. A message says if this is
+  unavailable.
+- Extra punctuation in the 14, 16, 18, and 20 px interface fonts, and eight more CJK characters in
+  the fallback font. This is not full CJK support.
+
+### Changed
+
+- USB Storage now waits for diskOS to finish reading and writing the card, confirms the card really
+  was handed over and really came back, and only then resumes artwork caching. A pending handoff
+  survives a UI restart.
+- USB Storage is refused during a library scan, and whenever diskOS cannot confirm that the card is
+  protected or who owns it. If a handoff is left uncertain, diskOS keeps card access off and asks for
+  a reboot.
+- Library scans, browsing, artwork, lyrics, book details, playlists, and playback commands wait for
+  these card checks. If protection is unavailable, diskOS keeps its card features off and says so;
+  the stock player still starts.
+- On V2.40, cold-boot card handling tries the direct mount before sending an insert event.
+- First-boot setup uses only the UI built into the flashed image; the SD-card fallback copy is gone.
+- Restart is temporarily removed from Settings until it can wait for card writes to finish.
+- Bluetooth starts off when there is no saved diskOS preference. Saved preferences are kept.
+  Turning it on from Quick Settings now waits for it to become ready.
+- Home, Now Playing, and Quick Settings share the same transport controls. The play/pause icon
+  responds at once. Quick Settings skips 15 s back and 30 s forward in audiobooks.
+- Quick Settings allows the transport row only with five or fewer tiles enabled.
+- Settings values sit below their labels, controls use the current accent colour, and search fits
+  the round screen better.
+- Debug Mode's description now says SSH over Wi-Fi; the USB serial shell is for developer builds.
+- The installer accepts only the unmodified official V2.09, V2.28, and V2.40 firmware for install
+  and build. The untested-firmware override no longer applies to them. V2.57 is refused.
+- Release packaging requires the boot selector, its probe and helper, and the delete guard, and the
+  image check verifies all of them and the patched boot script.
+
+### Fixed
+
+- Stopping card access now cancels a running scan and all artwork work. A cancelled scan keeps the
+  previous library.
+- Artwork cache files are flushed to the card before they are used (where the card supports it);
+  artwork and playlist exports also try to flush their folder.
+- Player start-up and the hand-off to stock have firmer time limits, clean up their helper
+  processes, and reset signals correctly.
+- Default UI's boot flag is written by a time-limited helper that reports failure.
+- Bluetooth status and audio-route checks are time-limited: the check is killed along with anything
+  it started, and cleanup never waits without a limit. Bluetooth shutdown no longer waits on the
+  Bluetooth service. This closes one way the screen could freeze, not every possible one.
+- Scan messages now tell apart refused, running, failed, and finished scans, with a count of skipped
+  files. Help hints no longer replace an active message.
+- Failed playback, seek, and playlist-export requests now report failure.
+- The mode picker keeps showing "switching" until a mode change finishes, and clears the checkmark
+  if it fails.
+- The boot log keeps earlier start-up messages until it reaches its size limit.
+
 ## [1.1.2] - 2026-09-20
 
 ### Fixed
@@ -36,15 +176,6 @@ diskOS remains beta software; version numbers do not imply broad hardware or fea
 - Kept the existing build path unchanged on Linux with a case-sensitive filesystem and on
   case-sensitive macOS volumes. Validated on real macOS with `back_home.png` and `BACK_HOME.png`
   coexisting after extraction, and on Linux. macOS device flashing remains unverified end to end.
-
-### Acknowledgements
-
-- Pierre Nel ([@pierrenel](https://github.com/pierrenel)) contributed the macOS
-  case-insensitive-filesystem fix ([PR #2](https://github.com/b0hemia/diskos/pull/2)).
-- [eudj1n](https://github.com/eudj1n) reported the V2.40 image-size issue
-  ([#1](https://github.com/b0hemia/diskos/issues/1)) with a byte-exact stock rootfs reproduction,
-  reported the Cyrillic rendering issue ([#3](https://github.com/b0hemia/diskos/issues/3)),
-  and built a QEMU preview harness.
 
 ## [1.1.0] - 2026-09-20
 
@@ -94,6 +225,7 @@ diskOS remains beta software; version numbers do not imply broad hardware or fea
 - MIT-licensed installer tooling, recovery documentation, hardware notes, and third-party notices.
   The initial release distributed the UI as a binary; UI source publication followed in v1.1.0.
 
+[1.1.3]: https://github.com/b0hemia/diskos/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/b0hemia/diskos/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/b0hemia/diskos/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/b0hemia/diskos/compare/v1.0.0-beta...v1.1.0
