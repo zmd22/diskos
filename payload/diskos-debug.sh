@@ -35,8 +35,18 @@ overlay_present() {
 
 ensure_db() {
     mkdir -p "$KEYS" 2>/dev/null
-    # Provision/refresh the dropbear binary from the shipped rootfs copy (survives flashes on /usr/data).
-    if [ ! -x "$DB" ] && [ -f "$BUNDLED" ]; then cp "$BUNDLED" "$DB" 2>/dev/null; chmod +x "$DB" 2>/dev/null; fi
+    # Provision/refresh the dropbear binary from the shipped rootfs copy. The copy on /usr/data survives
+    # flashes, so a copy left by an older image must be REPLACED whenever it differs from the shipped one
+    # (not only when missing). Copy to a temp name, prove it matches, then rename over the old one: a
+    # failed copy leaves the old binary in place, and a running daemon keeps its own (old) file.
+    if [ -f "$BUNDLED" ] && ! cmp -s "$BUNDLED" "$DB" 2>/dev/null; then
+        rm -f "$DB.new" 2>/dev/null
+        if cp "$BUNDLED" "$DB.new" 2>/dev/null && chmod 755 "$DB.new" 2>/dev/null && cmp -s "$BUNDLED" "$DB.new"; then
+            mv -f "$DB.new" "$DB" 2>/dev/null
+        fi
+        rm -f "$DB.new" 2>/dev/null
+    fi
+    [ -f "$DB" ] && [ ! -x "$DB" ] && chmod 755 "$DB" 2>/dev/null   # identical copy that lost its exec bit
     [ -x "$DB" ] || return 1
     [ -s "$KEYS/ed25519_host_key" ] || "$DB" dropbearkey -t ed25519       -f "$KEYS/ed25519_host_key" >/dev/null 2>&1
     [ -s "$KEYS/rsa_host_key" ]     || "$DB" dropbearkey -t rsa -s 2048   -f "$KEYS/rsa_host_key"     >/dev/null 2>&1
