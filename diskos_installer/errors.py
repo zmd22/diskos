@@ -47,7 +47,8 @@ class FlashError(DiskOSError):
     code = "E300"
 
 
-# Device-writer result codes (from my_write5.c dbg[16]) → stable F-codes for the user.
+# Device-writer result codes (from my_write6.c dbg[16]) → stable F-codes for the user. 0xDEAD0007.. are base-gate
+# refusals: the writer stopped before unlocking or erasing anything (see basegate.GATE_CODES).
 DEVICE_RESULT_CODES = {
     0x600DF10C: ("F001", "SUCCESS"),
     0xDEAD0001: ("F101", "ABORT init/ECC"),
@@ -56,7 +57,23 @@ DEVICE_RESULT_CODES = {
     0xDEAD0004: ("F104", "ABORT too many bad blocks"),
     0xDEAD0005: ("F105", "ABORT ECC re-enable failed"),
     0xDEAD0006: ("F106", "ABORT bad-block marker unreadable"),
+    0xDEAD0007: ("F201", "REFUSED flash plan missing/damaged (nothing written)"),
+    0xDEAD0008: ("F202", "REFUSED Disc not on the image's firmware base (nothing written)"),
+    0xDEAD0009: ("F203", "REFUSED image in memory is not the planned one (nothing written)"),
+    0xDEAD000A: ("F204", "REFUSED NAND not at power-on state (nothing written)"),
+    0xDEAD000B: ("F205", "REFUSED uncorrectable page in a base partition (nothing written)"),
+    0xDEAD000C: ("F206", "REFUSED base bad-block marker unreadable (nothing written)"),
+    0xDEAD000D: ("F207", "REFUSED base partition has no good blocks (nothing written)"),
+    0xDEAD000E: ("F208", "REFUSED base page unreadable (nothing written)"),
+    0xDEAD0010: ("F209", "REFUSED no kernel image in the kernel partition (nothing written)"),
+    0xDEAD0011: ("F210", "REFUSED no squashfs in the recovery partition (nothing written)"),
+    0xDEAD0012: ("F211", "REFUSED base component longer than its partition (nothing written)"),
 }
+
+# For a result that is UNKNOWN after the writer was started: it may still be running on the Disc by itself.
+WAIT_THEN_RECOVER = ("The Disc may still be writing by itself: leave it connected and powered for at least 25 "
+                     "minutes, then power-cycle it. If it does not boot, it is normally recoverable via mask-ROM "
+                     "(hold Volume-Down while plugging in USB) - re-flash your saved stock image or diskOS.")
 
 RECOVERABLE = ("The device is normally recoverable via mask-ROM (not guaranteed for every unit "
                "or failure): power the device OFF, hold Volume-Down, plug in USB to return to "
